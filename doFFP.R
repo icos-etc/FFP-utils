@@ -593,7 +593,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
             FFP.input.list[['polygon_area']]=FFP.isop.df$Area
             
             # Insert time variable 
-            FFP.input.list[['time']]=as.character(format(FFP.input.df.cur$'TIMESTAMP', "%Y-%M-%d %H:%M"))
+            FFP.input.list[['time']]=as.character(format(FFP.input.df.cur$'TIMESTAMP', "%Y-%m-%d %H:%M"))
             
             # Define the maximum number of char for the date field in the polygon attribute table
             FFP.input.list[['char_length']]=nchar(FFP.input.list$time[1])
