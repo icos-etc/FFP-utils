@@ -137,7 +137,7 @@ library("purrr")
 zip.list=list.files("ZIP\\My data cart\\", pattern = 'zip', full.names = T)
 
 # Generate the input table as R object for only one day
-input.list=walk(zip.list, ~ CPtoFFPinput(zip.file=.x, save.input.table = F, return.input = T, 
+input.list=map(zip.list, ~ CPtoFFPinput(zip.file=.x, save.input.table = F, return.input = T, 
                                          start.date = '2023-11-21', end.date = '2023-11-21'))
 
 # Filter out sites with NULL dataframes (where not all the input parameters are available) 
