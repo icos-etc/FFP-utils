@@ -20,6 +20,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                save.ncplot=TRUE          # Save a sample plot of nc the file
 )     
 {
+
   
   # Install pacman
   if (!require("pacman", quietly = T)) {install.packages("pacman")} 
@@ -35,7 +36,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
   prog.mes <- crayon::cyan
   
   # Customize domain 
-  FFP.domain <- FFP.domain * c(-1, 1,-1, 1)
+  FFP.domain.ext <- FFP.domain * c(-1, 1,-1, 1)
   
   # Load local functions if they aren't already loaded 
   if(!exists('calc_footprint_FFP_climatology'))   {source(FFP.function.path)}
@@ -256,28 +257,6 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
         cat(prog.mes(paste0('\n', bold(unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d'))), ': ', 
                             'Computing the 2D footprint for all the timestamps at once')))
         
-        # FFP calculation (future parallel)
-        #pacman::p_load(furrr)
-        #plan(multisession, workers = 4)
-        
-        #FFP.ls=future_map(.x = split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), # Split the input to create a list
-        #                  .f = function(x) 
-        #                    tryCatch(expr = calc_footprint_FFP_climatology(
-        #                      zm = x$zm,                  
-        #                      z0 = x$z0,                 
-        #                      umean = x$umean,            
-        #                      h = x$PBL,                  
-        #                      ol = x$ol,                  
-        #                      sigmav = x$sigmav,         
-        #                      ustar = x$ustar,            
-        #                      wind_dir = x$wind_dir,     
-        
-        #                      # optional input
-        #                      domain = FFP.domain, dx = dx, dy = dx, # nx = 1000, ny = 1000,                
-        #                      r = FFP.R, rslayer =  1, smooth_data = 1, # crop = 1,                           
-        #                      pulse = 0),
-        #                      error = function(e) NULL), .progress = T)
-        
         # Function not parallelized
         FFP.ls=lapply(split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), # Split the input to create a list
                       FUN = function(x) 
@@ -292,7 +271,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                           wind_dir = x$wind_dir,     
                           
                           # optional input
-                          domain = FFP.domain, dx = dx, dy = dx, # nx = 1000, ny = 1000,                
+                          domain = FFP.domain.ext, dx = dx, dy = dx, # nx = 1000, ny = 1000,                
                           r = FFP.R, rslayer =  1, smooth_data = 1, # crop = 1,                           
                           pulse = 0),
                           error = function(e) NULL))
@@ -528,8 +507,8 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           } else { # If no file exist 
             
             # store the X,Y dimensions of the FFP arrays (used for nc file dimension and variables)
-            FFP.Xdim <- seq(min(FFP.domain), max(FFP.domain), 1)
-            FFP.Ydim <- seq(min(FFP.domain), max(FFP.domain), 1) 
+            FFP.Xdim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), 1)
+            FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.exy), 1) 
             
             # store the UTM coordinates of the FFP arrays (used for nc file dimensin and variables)
             FFP.lon <- FFP.Xdim + EC.tower.utm[1]
@@ -628,7 +607,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
             
           } # Isopleth input phase ....... ENDING
           
-          
+         
           # . Define input parameters (QC - EC Tower Coordinates) ---------------
           
           # Retrieving QC flag # 0: produced; 1: not produced, and adding to the list
@@ -718,6 +697,8 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           ffp.ncfname <- paste0(ffp.ncfpath, site.ID, "_FFP2D_", levels(days.factor)[i.day], ".nc")
           ffp.dfname <- "FFP"
           
+          # Define chunksize
+          chunk.size=length(seq(from=-FFP.domain, to=FFP.domain, by=dx))
           
           # Create and write a projected netCDF file ++++++++++++++++++++++++++++++
           # Creating and writing (new) netCDF files involves first defining or “laying out” the dimensions and coordinate variables and 
@@ -754,7 +735,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                                               create_dimvar = F)
           
           # GRID variables
-          
+
           # FFP grid #
           FFP_mtx30_def <- ncdf4::ncvar_def(name = ffp.dfname,
                                             units = "m-2",
@@ -763,7 +744,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                                             longname = "Matrix of normalised 2D footprint values",
                                             prec = "integer",
                                             compression = 9, 
-                                            chunksizes = c(2001,2001,1), 
+                                            chunksizes = c(chunk.size, chunk.size, 1), 
                                             shuffle = TRUE)
           
           # CRS #
@@ -850,7 +831,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
             # Time (char) # 
             FFP_var_time <- ncdf4::ncvar_def(name = "observation_time",
                                              units='',
-                                             dim = list(FFP_dim_nchar, FFP_dim_inst), ## Sempre in teoria ##
+                                             dim = list(FFP_dim_nchar, FFP_dim_inst), 
                                              missval = NULL,
                                              longname = 'time of each observation',
                                              prec = "char")
