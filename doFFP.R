@@ -507,8 +507,8 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           } else { # If no file exist 
             
             # store the X,Y dimensions of the FFP arrays (used for nc file dimension and variables)
-            FFP.Xdim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), 1)
-            FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.exy), 1) 
+            FFP.Xdim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx)
+            FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx) 
             
             # store the UTM coordinates of the FFP arrays (used for nc file dimensin and variables)
             FFP.lon <- FFP.Xdim + EC.tower.utm[1]
