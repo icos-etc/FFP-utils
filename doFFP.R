@@ -975,21 +975,21 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           
           
           # FFP_mtx30_def
-          ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "scale_factor", 
-                           attval = scale.offset['sf'])
-          ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "add_offset", 
-                           attval = scale.offset['ofst'])
+          ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "grid_mapping", 
+                           attval = 'UTM_Coordinate_System')
+          ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "coordinates", 
+                           attval = 'x y')
           
           if(any(FFP.input.list[['QC_Flag']]!=1)) # Only if at least one non-NA matrix is produced
-            
+          
           {
-            ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "grid_mapping", 
-                             attval = 'UTM_Coordinate_System')
-            ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "coordinates", 
-                             attval = 'x y')
+            ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "scale_factor", 
+                             attval = scale.offset['sf'])
+            ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "add_offset", 
+                             attval = scale.offset['ofst'])
           }
-          
-          
+
+                         
           # QC # 
           ncdf4::ncatt_put(ffp.ncout, varid = "quality_flag", attname = "standard_name",
                            attval='quality_flag')
