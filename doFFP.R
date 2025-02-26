@@ -6,16 +6,17 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                EC.tower.coords=NULL,     # Ec tower coordinates (Lat, Lon)
                site.ID=NULL,             # site.ID
                PID=NULL,                 # site PID
-               FFP.function.path="local_functions\\calc_footprint_FFP_climatology.R", 
-               ## If specified, full path of FFP function, otherwise local path
+               FFP.function.path="local_functions\\calc_footprint_FFP_climatology.R", # If specified, full path of FFP function, otherwise local path
+               do.parallel=FALSE,        # parallelize the calculation of footprint
                max.gap = 4,              # maximum number of consecutive half-hours to fill with LOCF
                FFP.domain = 1000,        # Domain size as an array of (xmin xmax ymin ymax) [m] *1.
                dx = 1,                   # Cell size of domain [m] (default is dx = dy = 1 m)
-               FFP.R = c(50,70,80,90),
+               FFP.R = c(50,70,80,90),   # Isopleths
+               which.FFP.R = 70,         # Which isopleth save
                drop.trivial.srcs = TRUE, # whether to remove point sources with a trivial contribution
-               save.FFP.mtx.as='nc',          # csv, nc (NetCDF), NULL (no save)
-               save.plot.FFP.mtx = FALSE,     # Whether to save a plot of the FFP2D (matrix and isoplethes, not the spatial polygons)
-               return.isopleth.70=TRUE,  # Return 70% isopleth in the netCDF file  
+               save.FFP.mtx.as='nc',     # csv, nc (NetCDF), NULL (no save)
+               save.plot.FFP.mtx = FALSE,# Whether to save a plot of the FFP2D (matrix and isoplethes, not the spatial polygons)
+               return.isopleth=TRUE,     # Return chosen isopleth in the netCDF file  
                save.log=TRUE,            # Save messages files to log
                save.ncplot=TRUE          # Save a sample plot of nc the file
 )     
@@ -199,9 +200,6 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
     
     # Single FFP ################################################################
     
-    
-    #if (do.single.FFP) {
-    
     # Create a days factor to split the dataset into daily chunks
     if (!any(grepl('POSIX', class(FFP.input.df$'TIMESTAMP')))) 
     { # if timestamp is reported as ISO (character), convert it to a time object
@@ -241,7 +239,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
         
       {
         
-        cat(warn(paste0('\n [!]', bold(unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d'))), ': ',  
+        cat(warn(paste0('\n [!] ', bold(unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d'))), ': ',  
                         'no input data is available - model is not computed - no file is produced', '\n')))
         
         # Add messages to log
@@ -257,27 +255,57 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
         cat(prog.mes(paste0('\n', bold(unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d'))), ': ', 
                             'Computing the 2D footprint for all the timestamps at once')))
         
-        # Function not parallelized
-        FFP.ls=lapply(split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), # Split the input to create a list
-                      FUN = function(x) 
-                        tryCatch(expr = calc_footprint_FFP_climatology( 
-                          zm = x$zm,                  
-                          z0 = x$z0,                 
-                          umean = x$umean,            
-                          h = x$PBL,                  
-                          ol = x$ol,                  
-                          sigmav = x$sigmav,         
-                          ustar = x$ustar,            
-                          wind_dir = x$wind_dir,     
-                          
-                          # optional input
-                          domain = FFP.domain.ext, dx = dx, dy = dx, # nx = 1000, ny = 1000,                
-                          r = FFP.R, rslayer =  1, smooth_data = 1, # crop = 1,                           
-                          pulse = 0),
-                          error = function(e) NULL))
+        if(do.parallel)
+          
+          {
+           # FFP calculation (future parallel)
+           pacman::p_load(furrr)
+           plan(multisession, workers = 3) # Set a relatively low number of workers to avoid PC crashing
+          
+           FFP.ls=future_map(.x = split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), # Split the input to create a list
+                             .f = function(x) 
+                              tryCatch(expr = calc_footprint_FFP_climatology(
+                                zm = x$zm,                  
+                                z0 = x$z0,                 
+                                umean = x$umean,            
+                                h = x$PBL,                  
+                                ol = x$ol,                  
+                                sigmav = x$sigmav,         
+                                ustar = x$ustar,            
+                                wind_dir = x$wind_dir,     
+                                
+                                # optional input
+                                domain = FFP.domain.ext, dx = dx, dy = dx,                 
+                                r = FFP.R, rslayer =  1, smooth_data = 1,                            
+                                pulse = 0),
+                                error = function(e) NULL), .progress = T)
+
+          # Free unused memory
+          gc()
+          
+        } else 
         
-        # Free unused memory
-        #gc()
+        {
+          # Function not parallelized
+          FFP.ls=lapply(split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), # Split the input to create a list
+                        FUN = function(x) 
+                          tryCatch(expr = calc_footprint_FFP_climatology( 
+                            zm = x$zm,                  
+                            z0 = x$z0,                 
+                            umean = x$umean,            
+                            h = x$PBL,                  
+                            ol = x$ol,                  
+                            sigmav = x$sigmav,         
+                            ustar = x$ustar,            
+                            wind_dir = x$wind_dir,     
+                            
+                            # optional input
+                            domain = FFP.domain.ext, dx = dx, dy = dx,                 
+                            r = FFP.R, rslayer =  1, smooth_data = 1,                            
+                            pulse = 0),
+                            error = function(e) NULL))
+  
+          }
         
         # Names are not necessary
         names(FFP.ls)=NULL
@@ -285,25 +313,21 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
         # Format time. It needs to be always a valid value (no gaps allowed in the final product)
         cur.ts <- format(FFP.input.df.cur$'TIMESTAMP', '%Y%m%d%H%M')
         
-        # Compute error index (everything different than zero)
-        # Index 1: no FFP matrix 
-        FFP.err.indx_1 <- as.vector(which(unlist(lapply(FFP.ls, 
-                                                        function(x) ifelse(all(is.nan(x[['fclim_2d']])), 
-                                                                           yes = T, no=F)))))
+        ## Extract FFP.R list ## 
+        FFP.R.list=lapply(FFP.ls, function(x) x[['r']])
         
-        # Index 2: FFP matrix yes, at least 70% isopleth yes, but not the 90% (matrix not clipped)
-        tmp=lapply(FFP.ls, function(x) ifelse(!is.na(x[['r']][2]) & is.na(x[['r']][4]), yes = T, no=F))
-        tmp[lengths(tmp)==0]=NA
-        FFP.err.indx_2 <- as.vector(which(unlist(tmp)))
-        
-        # Index 3: FFP matrix yes, 70% isopleth no
-        tmp=lapply(FFP.ls, function(x) ifelse(is.na(x[['r']][2]), yes = T, no=F))
-        tmp[lengths(tmp)==0]=NA
-        FFP.err.indx_3 <- as.vector(which(unlist(tmp)))
-        
+        # Computing error index # Index 1: no FFP matrix
+        FFP.err.indx_1 <- which(sapply(FFP.R.list, function(x) ifelse(is.null(x), yes = T, no=F)))
+
+        # Index 2: FFP matrix yes, but not the higher FFP R (matrix is thus not clipped)
+        FFP.err.indx_2=which(sapply(FFP.R.list, function(x) 
+          ifelse(all(sum(is.na(x))==1, is.na(x[which.max(FFP.R)])), yes = T, no=F)))
+
+        # Index 3: FFP matrix yes, more than one isopleth no
+        FFP.err.indx_3=which(lapply(FFP.R.list, function(x) ifelse(sum(is.na(x))>1, yes = T, no=F))==T)
+
         FFP.err.indx=sort(c(FFP.err.indx_1, FFP.err.indx_2, FFP.err.indx_3))
-        rm(tmp)
-        
+
         # Re-create the full QC modifying 1, 2 and 3 
         QC=rep(0, nrow(FFP.input.df.cur))
         
@@ -317,23 +341,28 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                                                      as.character(format(FFP.input.df.cur[x ,'TIMESTAMP'], '%Y-%m-%d %H:%M'))))))) 
         
         invisible(sapply(FFP.err.indx_2, 
-                         function(x) cat(warn(paste0('\n [!] according to the model requirements, 90% isolpleth was not computed for the timestamp ',
+                         function(x) cat(warn(paste0('\n [!] according to the model requirements, ', FFP.R[which.max(FFP.R)], 
+                                                     '% isoline was not computed for the timestamp ',
                                                      as.character(format(FFP.input.df.cur[x ,'TIMESTAMP'], '%Y-%m-%d %H:%M'))))))) 
         
         invisible(sapply(FFP.err.indx_3, 
-                         function(x) cat(warn(paste0('\n [!] according to the model requirements, 70% isolpleth was not computed for the timestamp ',
+                         function(x) cat(warn(paste0('\n [!] according to the model requirements, ', 
+                                                     paste0(FFP.R[which(is.na(FFP.R.list[[x]]))], '% '), 
+                                                     'isoline was not computed for the timestamp ',
                                                      as.character(format(FFP.input.df.cur[x ,'TIMESTAMP'], '%Y-%m-%d %H:%M'))))))) 
         
         # Add messages to log
         Log_list=c(Log_list, sapply(FFP.err.indx_1, function(x) paste0('[!] according to the model requirements, FFP was not computed for the timestamp ',
                                                                        as.character(format(FFP.input.df.cur[x ,'TIMESTAMP'], '%Y-%m-%d %H:%M')))))
         
-        Log_list=c(Log_list, sapply(FFP.err.indx_2, function(x) paste0('[!] according to the model requirements, 90% isolpleth was not computed for the timestamp ',
+        Log_list=c(Log_list, sapply(FFP.err.indx_2, function(x) paste0('\n [!] according to the model requirements, ', FFP.R[which.max(FFP.R)], 
+                                                                       '% isoline was not computed for the timestamp ',
                                                                        as.character(format(FFP.input.df.cur[x ,'TIMESTAMP'], '%Y-%m-%d %H:%M')))))
         
-        Log_list=c(Log_list, sapply(FFP.err.indx_3, function(x) paste0('[!] according to the model requirements, 70% isolpleth was not computed for the timestamp ',
+        Log_list=c(Log_list, sapply(FFP.err.indx_3, function(x) paste0('\n [!] according to the model requirements, ', 
+                                                                       paste0(FFP.R[which(is.na(FFP.R.list[[x]]))], '% '), 
+                                                                       'isoline was not computed for the timestamp ',
                                                                        as.character(format(FFP.input.df.cur[x ,'TIMESTAMP'], '%Y-%m-%d %H:%M')))))
-        
         
         # Check if at least one FFP was computed #
         if(length(FFP.err.indx_1) == length(FFP.ls))
@@ -484,92 +513,88 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           
           # . Define nc single matrix dimensions ---------------
           
-          if (all(QC==0)) { # If all the matrices were produced 
-            
-            # store the X,Y dimensions of the FFP arrays (used for nc file dimension and variables)
-            FFP.Xdim <- FFP.ls[[1]]$'x_2d'[1, ]  # take the first row of x_2d, 
-            FFP.Ydim <- FFP.ls[[1]]$'y_2d'[, 1]  # take the first column of y_2d
-            
-            # store the UTM coordinates of the FFP arrays (used for nc file dimensin and variables)
-            FFP.lon <- FFP.Xdim + EC.tower.utm[1]
-            FFP.lat <- FFP.Ydim + EC.tower.utm[2]
-            
-          } else if (any(QC==0)) { # Only the last valid time is considered 
+          if (any(QC==0)) { # Only the last valid time is considered 
             
             # store the X,Y dimensions of the FFP arrays (used for nc file dimension and variables)
             FFP.Xdim <- FFP.ls[which(QC == 0)][[1]]$'x_2d'[1, ]  # take the first row of x_2d, 
             FFP.Ydim <- FFP.ls[which(QC == 0)][[1]]$'y_2d'[, 1]  # take the first column of y_2d
             
-            # store the UTM coordinates of the FFP arrays (used for nc file dimensin and variables)
-            FFP.lon <- FFP.Xdim + EC.tower.utm[1]
-            FFP.lat <- FFP.Ydim + EC.tower.utm[2]
-            
-          } else { # If no file exist 
+          } else { # If no matrix exist use the extent and resolution parameters
             
             # store the X,Y dimensions of the FFP arrays (used for nc file dimension and variables)
             FFP.Xdim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx)
             FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx) 
             
-            # store the UTM coordinates of the FFP arrays (used for nc file dimensin and variables)
-            FFP.lon <- FFP.Xdim + EC.tower.utm[1]
-            FFP.lat <- FFP.Ydim + EC.tower.utm[2]
-            
           } 
           
+          # store the UTM coordinates of the FFP arrays (used for nc file dimension and variables)
+          FFP.lon <- FFP.Xdim + EC.tower.utm[1]
+          FFP.lat <- FFP.Ydim + EC.tower.utm[2]
+          
+          # Create an index of the correct isopleth calculation
+          Idx_Iso=which(sapply(FFP.R.list, function(x) any(x %in% (which.FFP.R/100))))
+          
           # . Define parameters linked to isopleths ---------------
-          if(return.isopleth.70)
+          if(return.isopleth)
             
           {
             
             # Area calculation on ST_Polygons # 
             FFP.sf=data.frame(Index=NULL, Area=NULL)
             
-            for(i in which(QC %in% c(0, 2)))
+            # Choose of the right isopleth 
+            Pos=which(sort(FFP.R) %in% which.FFP.R)
+            
+            if(length(Pos)==0)
               
             {
-              DF=data.frame(Lon=FFP.ls[[i]]$xr[[2]]+ EC.tower.utm[2], 
-                            Lat=FFP.ls[[i]]$yr[[2]]+ EC.tower.utm[1])
-              tmp=st_convex_hull(st_union(st_as_sf(na.omit(DF), coords=c('Lon', 'Lat'), crs=EPSG.code)))
-              
-              # Add a warning in case of NAs 
-              if(nrow(DF) != nrow(na.omit(DF)))
-                
-              {
-                cat(warn(paste0('\n [!] ', bold(unique(format(FFP.input.df.cur[i ,'TIMESTAMP'], '%Y-%m-%d %H:%M'))), ': ',  
-                                nrow(DF) - nrow(na.omit(DF)), ' NA(s) were found in the 70% isopleth coordinates list. The geometry is still calculated', '\n')))
-                
-                Log_list=c(Log_list, '', 
-                           paste0('[!] ', bold(unique(format(FFP.input.df.cur[i ,'TIMESTAMP'], '%Y-%m-%d %H:%M'))), ': ', 
-                                  nrow(DF) - nrow(na.omit(DF)), ' NA(s) were found in the 70% isopleth coordinates list. The geometry is still calculated'), '')
-              }
-              
-              tmp=st_sf(geometry=tmp)
-              tmp$Area=as.vector(st_area(tmp$geometry))
-              tmp$Index=i
-              tmp=st_drop_geometry(tmp)
-              
-              FFP.sf=rbind(FFP.sf, tmp)
+              stop('FFP isopleth chosen to be returned is not in the isopleths list of the FFP function')
             }
             
-            if(any(QC %in% c(1, 3))) # When at least one poligon is null, add a zero area 
+            
+            for(i in 1:length(FFP.ls))
               
             {
               
-              FFP.isop.df=rbind(FFP.sf, data.frame(Index=which(QC %in% c(1, 3)), Area=0))
-              FFP.isop.df=FFP.isop.df[order(FFP.isop.df$Index), ]
-              
-            } else # Simply order the result 
-              
-            {
-              
-              FFP.isop.df=FFP.sf[order(FFP.sf$Index), ]
+              if(i %in% Idx_Iso)
+                
+              {
+                DF=data.frame(Lon=FFP.ls[[i]]$xr[[Pos]]+ EC.tower.utm[2], 
+                              Lat=FFP.ls[[i]]$yr[[Pos]]+ EC.tower.utm[1])
+                tmp=st_convex_hull(st_union(st_as_sf(na.omit(DF), coords=c('Lon', 'Lat'), crs=EPSG.code)))
+                
+                # Add a warning in case of NAs 
+                if(nrow(DF) != nrow(na.omit(DF)))
+                  
+                {
+                  cat(warn(paste0('\n [!] ', bold(unique(format(FFP.input.df.cur[i ,'TIMESTAMP'], '%Y-%m-%d %H:%M'))), ': ',  
+                                  nrow(DF) - nrow(na.omit(DF)), ' NA(s) were found in the ', which.FFP.R, '% isopleth coordinates list. The geometry is still calculated', '\n')))
+                  
+                  Log_list=c(Log_list, '', 
+                             paste0('[!] ', bold(unique(format(FFP.input.df.cur[i ,'TIMESTAMP'], '%Y-%m-%d %H:%M'))), ': ', 
+                                    nrow(DF) - nrow(na.omit(DF)), ' NA(s) were found in the ', which.FFP.R, '% isopleth coordinates list. The geometry is still calculated'), '')
+                }
+                
+                tmp=st_sf(geometry=tmp)
+                tmp$Area=as.vector(st_area(tmp$geometry))
+                tmp$Index=i
+                tmp=st_drop_geometry(tmp)
+                
+                FFP.sf=rbind(FFP.sf, tmp)
+                
+              } else {
+                
+                tmp=data.frame(Index=i, Area=0)
+                FFP.sf=rbind(FFP.sf, tmp)
+                
+              }
               
             }
             
             # Input list definition (for dimensions and attributes)
             # Adding variables to the list
-            FFP.input.list[['polygon_index']]=FFP.isop.df$Index
-            FFP.input.list[['polygon_area']]=FFP.isop.df$Area
+            FFP.input.list[['polygon_index']]=FFP.sf$Index
+            FFP.input.list[['polygon_area']]=FFP.sf$Area
             
             # Insert time variable 
             FFP.input.list[['time']]=as.character(format(FFP.input.df.cur$'TIMESTAMP', "%Y-%m-%d %H:%M"))
@@ -577,32 +602,31 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
             # Define the maximum number of char for the date field in the polygon attribute table
             FFP.input.list[['char_length']]=nchar(FFP.input.list$time[1])
             
-            ## Add 3 vertices (for tower center) directly in XR and YR 
-            for( i in which(QC %in% c(1, 3)))
+            ## Add 3 vertices where the chosen isopleth is NA (for tower center) directly in XR and YR 
+            for(i in FFP.sf[FFP.sf$Area==0, 'Index']) #FFP.sf[FFP.sf$Area==0, 'Index']
             {
               # Three nodes with zero coords in the second sublist
-              FFP.ls[[i]]$xr=list(NA, rep(0, 3), NA, NA)
-              FFP.ls[[i]]$yr=list(NA, rep(0, 3), NA, NA)
+              FFP.ls[[i]]$xr[[Pos]]=rep(0, 3)
+              FFP.ls[[i]]$yr[[Pos]]=rep(0, 3)
               
             }
             
-            # Selection of the 70th isoplete 
-            FFP.iso.70=lapply(FFP.ls, FUN=function(x) na.omit(x$xr[[2]]))
+            # Selection of the chosen isoplete 
+            FFP.iso=lapply(FFP.ls, FUN=function(x) na.omit(x$xr[[Pos]]))
             
             # Extraction of total number of nodes, number of nodes for each polygon
-            FFP.input.list[['nodes_number_polygon']]=lengths(FFP.iso.70) 
-            FFP.input.list[['nodes_total']]=sum(lengths(FFP.iso.70))  
-            FFP.input.list[['polygon_number']]=length(FFP.iso.70) 
+            FFP.input.list[['nodes_number_polygon']]=lengths(FFP.iso) 
+            FFP.input.list[['nodes_total']]=sum(lengths(FFP.iso))  
+            FFP.input.list[['polygon_number']]=length(FFP.iso) 
             
-            # Point coordinates in a counterclock-wise order # Remove NA generated by QC-3
+            # Point coordinates in a counterclock-wise order 
             FFP.input.list[['nodes_x']]=as.vector(na.omit(unlist(lapply(FFP.ls, 
-                                                                        FUN=function(x) rev(x$xr[[2]]) + EC.tower.utm[1]))))
+                                                                        FUN=function(x) rev(x$xr[[Pos]]) + EC.tower.utm[1]))))
             
             FFP.input.list[['nodes_y']]=as.vector(na.omit(unlist(lapply(FFP.ls, 
-                                                                        FUN=function(x) rev(x$yr[[2]]) + EC.tower.utm[2]))))
+                                                                        FUN=function(x) rev(x$yr[[Pos]]) + EC.tower.utm[2]))))
             
-            # Remove the data frame and the sf object 
-            rm(FFP.isop.df)
+            # Remove the sf object 
             rm(FFP.sf)
             
           } # Isopleth input phase ....... ENDING
@@ -610,10 +634,8 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
          
           # . Define input parameters (QC - EC Tower Coordinates) ---------------
           
-          # Retrieving QC flag # 0: produced; 1: not produced, and adding to the list
+          # Retrieving QC flag and adding it to the list
           FFP.input.list[['QC_Flag']]=QC
-          # Modify this part according to the number of layers produced 
-          #FFP.input.list[['QC_Flag']]=ifelse(lengths(FFP.ls) <= 4, yes=1, no=0)
           
           # Add EC tower coords to the input list 
           FFP.input.list[['EC_Tower_x']]=EC.tower.utm[1]
@@ -635,7 +657,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           #   each FFP matrix to sum 1 (now is around 0.9 as the threshold used)
           FFP.mtx=lapply(FFP.ls, function(x) x[['fclim_2d']]/sum(x[['fclim_2d']], na.rm = T))
           
-          # Calculate scale and offset factors only if at least one not-NA matrix is produced
+          # Calculate scale and offset factors only if at least one not-NA matrix is returned
           if(any(FFP.input.list[['QC_Flag']]!=1))
             
           {
@@ -662,11 +684,12 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                                dim = c(length(FFP.Xdim), length(FFP.Ydim), length(FFP.mtx)))
             
           } else {
-      
-                  # Extract only the array without calculating scale and offset factors
-                  FFP.array <- array(unlist(FFP.mtx, use.names = F), 
-                                     dim = c(length(FFP.Xdim), length(FFP.Ydim), length(FFP.mtx)))
-                 }
+            
+            # Extract only the array without calculating scale and offset factors
+            FFP.array <- array(unlist(FFP.mtx, use.names = F), 
+                               dim = c(length(FFP.Xdim), length(FFP.Ydim), length(FFP.mtx)))
+            
+          }
                 
           # Free unused memory
           rm(FFP.mtx)
@@ -696,9 +719,6 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           # File ID and name #
           ffp.ncfname <- paste0(ffp.ncfpath, site.ID, "_FFP2D_", levels(days.factor)[i.day], ".nc")
           ffp.dfname <- "FFP"
-          
-          # Define chunksize
-          chunk.size=length(seq(from=-FFP.domain, to=FFP.domain, by=dx))
           
           # Create and write a projected netCDF file ++++++++++++++++++++++++++++++
           # Creating and writing (new) netCDF files involves first defining or “laying out” the dimensions and coordinate variables and 
@@ -744,7 +764,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                                             longname = "Matrix of normalised 2D footprint values",
                                             prec = "integer",
                                             compression = 9, 
-                                            chunksizes = c(chunk.size, chunk.size, 1), 
+                                            chunksizes = c(length(FFP.lat),length(FFP.lon), 1), 
                                             shuffle = TRUE)
           
           # CRS #
@@ -771,9 +791,9 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                                              longname = "Eddy covarinace tower coordinates in UTM",
                                              prec = "float")
           
-          # If 70% isopleth should be returned  
+          # If isopleth should be returned  
           
-          if(return.isopleth.70) {
+          if(return.isopleth) {
             
             # nodes # Nodes number
             FFP_dim_node <- ncdf4::ncdim_def(name = 'nodes', 
@@ -857,7 +877,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                                            units='1',
                                            dim = list(FFP_dim_inst), 
                                            missval = NULL,
-                                           longname = 'id of each polygon referred to the 70% isoplete',
+                                           longname = paste0('id of each polygon referred to the ', which.FFP.R, '% isoplete'),
                                            prec = "integer")
             
             
@@ -902,7 +922,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_QC, vals = FFP.input.list$QC_Flag) ## Flag
           
           # Additional variables related to isopleth
-          if(return.isopleth.70) {  
+          if(return.isopleth) {  
             
             # FFP_var_id 
             ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_id, vals = FFP.input.list$polygon_index) ## Polygon ID
@@ -980,8 +1000,8 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "coordinates", 
                            attval = 'x y')
           
-          if(any(FFP.input.list[['QC_Flag']]!=1)) # Only if at least one non-NA matrix is produced
-          
+          if(any(FFP.input.list[['QC_Flag']]!=1))
+            
           {
             ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "scale_factor", 
                              attval = scale.offset['sf'])
@@ -994,7 +1014,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           ncdf4::ncatt_put(ffp.ncout, varid = "quality_flag", attname = "standard_name",
                            attval='quality_flag')
           
-          if(return.isopleth.70) { 
+          if(return.isopleth) { 
             
             ## Geometry container ## 
             ncatt_put(nc = ffp.ncout, varid = "geometry_container", attname = "geometry_type", 
@@ -1125,11 +1145,11 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           #ncatt_put(ffp.ncout, 0, "source", 
           #          "To define...")
           
-          if(return.isopleth.70) { 
+          if(return.isopleth) { 
             # summary
             ncatt_put(ffp.ncout, 0, "summary", 
                       paste0("The file contains the footprint estimation and the quality layer of the station", 
-                             site.ID, "at 30-min of temporal resolution. Additionally, a geometry containing the 70% isopleth boundary is provided. ", 
+                             site.ID, "at 30-min of temporal resolution. Additionally, a geometry containing the ", which.FFP.R, "% isopleth boundary is provided. ", 
                              "PID code of input data: ", PID))
           } else {
             
@@ -1150,7 +1170,7 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
                     {
                       paste0("WGS84/UTM", UTM.zone, 'N')
                     } else 
-                    {paste0("WGS84/UTM", UTM.zone, 'S')})
+                    { paste0("WGS84/UTM", UTM.zone, 'S')})
           
           # geospatial_lat_resolution
           ncatt_put(ffp.ncout, 0, "geospatial_lat_resolution", 
@@ -1189,11 +1209,11 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           #          "To define...")
           
           
-          if(return.isopleth.70) { 
+          if(return.isopleth) { 
             
             # Variables
             ncatt_put(ffp.ncout, 0, "Variables",
-                      "FFP, QC, 70% isopleth area")
+                      paste0("FFP, QC, ", which.FFP.R, "% isopleth area"))
             
           } else {
             
@@ -1254,8 +1274,8 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
       
       # Create log file
       log <- file.path(ffp.log.fpath, paste0(site.ID, '_log_', 
-                                             format(min(FFP.input.df$'TIMESTAMP'), '%Y%m%d'), '_', 
-                                             format(max(FFP.input.df$'TIMESTAMP'), '%Y%m%d'), ".log"))
+                                             as_date(min(FFP.input.df$'TIMESTAMP')), '_', 
+                                             as_date(max(FFP.input.df$'TIMESTAMP')), ".log"))
       
       # Open log
       lf <- logr::log_open(log)
@@ -1269,6 +1289,6 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
       
     }
     
-    #      } # Single DOFFP ending
-  } # DF, Coords and site.ID validity ending...
-} # FFP function ending
+    } # DF, Coords and site.ID validity ending...
+
+  } # FFP function ending
