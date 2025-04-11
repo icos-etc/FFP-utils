@@ -730,180 +730,188 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           # 3.2 # Definition of netCDF dimensions and variables --------------- 
           
           # FFP grid dimension definition (x, y, time)
-          FFP_dim_x <- ncdf4::ncdim_def(name = 'x', 
-                                        units= 'm',
-                                        longname = "x coordinate of projection",
-                                        vals = FFP.lon)
+          FFP_dim_x <- ncdim_def(name = 'x', 
+                                 units= 'm',
+                                 longname = "x coordinate of projection",
+                                 vals = FFP.lon)
           
-          FFP_dim_y <- ncdf4::ncdim_def(name = 'y', 
-                                        units= 'm',
-                                        longname = "y coordinate of projection",
-                                        vals = FFP.lat)
+          FFP_dim_y <- ncdim_def(name = 'y', 
+                                 units= 'm',
+                                 longname = "y coordinate of projection",
+                                 vals = FFP.lat)
           
-          FFP_dim_time <- ncdf4::ncdim_def(name = "time", 
-                                           units="seconds since 1970-01-01 00:00:00 GMT",
-                                           longname = "time in seconds since 1970-01-01 00:00:00 GMT",
-                                           vals = as.integer(as.POSIXct(cur.ts, format='%Y%m%d%H%M', tz='GMT')), 
-                                           unlim = T, # Time is unlimited (but not for humans!)
-                                           calendar="gregorian")
+          FFP_dim_time <- ncdim_def(name = "time", 
+                                    units="seconds since 1970-01-01 00:00:00 GMT",
+                                    longname = "time in seconds since 1970-01-01 00:00:00 GMT",
+                                    vals = as.integer(as.POSIXct(cur.ts, format='%Y%m%d%H%M', tz='GMT')), 
+                                    unlim = T, # Time is unlimited (but not for humans!)
+                                    calendar="gregorian")
           
           # Dimension (size=2) for the EC tower coordinates 
-          FFP_dim_ECoords <- ncdf4::ncdim_def(name = 'EC_Coords', 
-                                              units= '',
-                                              longname = "projected (x and y, respectively) coordinates of EC tower",
-                                              vals = 1:2, 
-                                              create_dimvar = F)
+          FFP_dim_ECoords <- ncdim_def(name = 'EC_Coords', 
+                                       units= '',
+                                       longname = "projected (x and y, respectively) coordinates of EC tower",
+                                       vals = 1:2, 
+                                       create_dimvar = F)
+          
+          # Dimension (size=48) for the QC 
+          FFP_dim_QC <- ncdim_def(name = 'QC_dim', 
+                                  units= '',
+                                  longname = "Quality flag of FFP matrix",
+                                  vals = 1:length(FFP.input.list$QC), 
+                                  create_dimvar = F)
+          
           
           # GRID variables
 
           # FFP grid #
-          FFP_mtx30_def <- ncdf4::ncvar_def(name = ffp.dfname,
-                                            units = "m-2",
-                                            dim = list(FFP_dim_x, FFP_dim_y, FFP_dim_time),
-                                            missval = fillvalue,
-                                            longname = "Matrix of normalised 2D footprint values",
-                                            prec = "integer",
-                                            compression = 9, 
-                                            chunksizes = c(length(FFP.lat),length(FFP.lon), 1), 
-                                            shuffle = TRUE)
+          FFP_mtx30_def <- ncvar_def(name = ffp.dfname,
+                                     units = "m-2",
+                                     dim = list(FFP_dim_x, FFP_dim_y, FFP_dim_time),
+                                     missval = fillvalue,
+                                     longname = "Matrix of normalised 2D footprint values",
+                                     prec = "integer",
+                                     compression = 9, 
+                                     chunksizes = c(length(FFP.lat),length(FFP.lon), 1), 
+                                     shuffle = TRUE)
           
           # CRS #
-          FFP_var_proj <- ncdf4::ncvar_def(name = "UTM_Coordinate_System",
-                                           units='m',
-                                           dim = NULL,
-                                           missval = NULL,
-                                           longname = 'CRS reference system (Universal Transverse Mercator)',
-                                           prec = "char")
+          FFP_var_proj <- ncvar_def(name = "UTM_Coordinate_System",
+                                    units='m',
+                                    dim = NULL,
+                                    missval = NULL,
+                                    longname = 'CRS reference system (Universal Transverse Mercator)',
+                                    prec = "char")
           
-          # Quality flag # Set in both cases
-          FFP_var_QC <- ncdf4::ncvar_def(name = "quality_flag",
-                                         units='1',
-                                         dim = list(FFP_dim_time),
-                                         longname = "Quality control on footprint calculation",
-                                         missval = NULL,
-                                         prec = "integer")
+          # Quality flag #
+          FFP_var_QC <- ncvar_def(name = "quality_flag",
+                                  units='1',
+                                  dim = FFP_dim_QC, 
+                                  longname = "Quality control on footprint calculation",
+                                  missval = NULL,
+                                  prec = "integer")
           
           # EC Tower coordinates
-          FFP_var_ECoord <- ncdf4::ncvar_def(name = "EC_tower_coordinates",
-                                             units = "m",
-                                             dim = FFP_dim_ECoords,
-                                             missval = NULL,
-                                             longname = "Eddy covarinace tower coordinates in UTM",
-                                             prec = "float")
+          FFP_var_ECoord <- ncvar_def(name = "EC_tower_coordinates",
+                                      units = "m",
+                                      dim = FFP_dim_ECoords,
+                                      missval = NULL,
+                                      longname = "Eddy covarinace tower coordinates in UTM",
+                                      prec = "float")
           
           # If isopleth should be returned  
           
           if(return.isopleth) {
             
             # nodes # Nodes number
-            FFP_dim_node <- ncdf4::ncdim_def(name = 'nodes', 
-                                             units= '', ## If dimvar F, then units should be empty ## 
-                                             longname = "number of nodes",
-                                             vals=1:FFP.input.list$nodes_total, 
-                                             create_dimvar = F)
+            FFP_dim_node <- ncdim_def(name = 'nodes', 
+                                      units= '', ## If dimvar F, then units should be empty ## 
+                                      longname = "number of nodes",
+                                      vals=1:FFP.input.list$nodes_total, 
+                                      create_dimvar = F)
             
             # instance # Number of polygons
-            FFP_dim_inst <- ncdf4::ncdim_def(name = 'instance', 
-                                             units= '',
-                                             longname = "number of polygons",
-                                             vals=1:FFP.input.list$polygon_number, 
-                                             create_dimvar = F)
+            FFP_dim_inst <- ncdim_def(name = 'instance', 
+                                      units = '',
+                                      longname = "number of polygons",
+                                      vals=1:FFP.input.list$polygon_number, 
+                                      create_dimvar = F)
             
             # n_char # Number of character of each string #
             # Maximum dimension equal to the maximum length of a string
-            FFP_dim_nchar <- ncdf4::ncdim_def(name = 'n_char', 
-                                              units= '',
-                                              longname = "length of each time string",
-                                              vals=1:FFP.input.list$char_length, 
-                                              create_dimvar = F)
+            FFP_dim_nchar <- ncdim_def(name = 'n_char', 
+                                       units= '',
+                                       longname = "length of each time string",
+                                       vals=1:FFP.input.list$char_length, 
+                                       create_dimvar = F)
             
             # Geometry container #
-            FFP_var_geomc <- ncdf4::ncvar_def(name = "geometry_container",
-                                              units='1',
-                                              dim = NULL,
-                                              missval = NULL,
-                                              longname = 'container of the geometry',
-                                              prec = "char")
+            FFP_var_geomc <- ncvar_def(name = "geometry_container",
+                                       units='1',
+                                       dim = NULL,
+                                       missval = NULL,
+                                       longname = 'container of the geometry',
+                                       prec = "char")
             
             # Nodes count #
-            FFP_var_nodes <- ncdf4::ncvar_def(name = "nodes_count",
-                                              units='1',
-                                              dim = list(FFP_dim_inst), 
-                                              missval = NULL,
-                                              longname = 'number of nodes for each feature',
-                                              prec = "integer")
+            FFP_var_nodes <- ncvar_def(name = "nodes_count",
+                                       units='1',
+                                       dim = FFP_dim_inst, 
+                                       missval = NULL,
+                                       longname = 'number of nodes for each feature',
+                                       prec = "integer")
             
             # Node coordinates (X, Y) # 
-            FFP_var_nodeX <- ncdf4::ncvar_def(name = "nodes_x",
-                                              units='m', 
-                                              dim = list(FFP_dim_node), 
-                                              missval = NULL,
-                                              longname = 'all nodes coordinates',
-                                              prec = "float")
+            FFP_var_nodeX <- ncvar_def(name = "nodes_x",
+                                       units='m', 
+                                       dim = FFP_dim_node, 
+                                       missval = NULL,
+                                       longname = 'all nodes coordinates',
+                                       prec = "float")
             
-            FFP_var_nodeY <- ncdf4::ncvar_def(name = "nodes_y",
-                                              units='m', 
-                                              dim = list(FFP_dim_node), 
-                                              missval = NULL,
-                                              longname = 'all nodes coordinates',
-                                              prec = "float")
+            FFP_var_nodeY <- ncvar_def(name = "nodes_y",
+                                       units='m', 
+                                       dim = FFP_dim_node, 
+                                       missval = NULL,
+                                       longname = 'all nodes coordinates',
+                                       prec = "float")
             
             # Time (char) # 
-            FFP_var_time <- ncdf4::ncvar_def(name = "observation_time",
-                                             units='',
-                                             dim = list(FFP_dim_nchar, FFP_dim_inst), 
-                                             missval = NULL,
-                                             longname = 'time of each observation',
-                                             prec = "char")
+            FFP_var_time <- ncvar_def(name = "observation_time",
+                                      units='',
+                                      dim = list(FFP_dim_nchar, FFP_dim_inst), 
+                                      missval = NULL,
+                                      longname = 'time of each observation',
+                                      prec = "char")
             
             # Quality flag # 
-            FFP_var_QC <- ncdf4::ncvar_def(name = "quality_flag",
-                                           units='1',
-                                           dim = list(FFP_dim_inst),
-                                           longname = "Quality control on footprint calculation",
-                                           missval = NULL,
-                                           prec = "integer")
+            FFP_var_QC <- ncvar_def(name = "quality_flag",
+                                    units='1',
+                                    dim = FFP_dim_inst,
+                                    longname = "Quality control on footprint calculation",
+                                    missval = NULL,
+                                    prec = "integer")
             
             # Polygon Area #
-            FFP_var_area <- ncdf4::ncvar_def(name = "polygon_area",
-                                             units='m',
-                                             dim = list(FFP_dim_inst), 
-                                             missval = NULL,
-                                             longname = 'area of the isoplete polygon in squared meters',
-                                             prec = "float")
+            FFP_var_area <- ncvar_def(name = "polygon_area",
+                                      units='m',
+                                      dim = FFP_dim_inst, 
+                                      missval = NULL,
+                                      longname = 'area of the isoplete polygon in squared meters',
+                                      prec = "float")
             
             # polygon ID # 
-            FFP_var_id <- ncdf4::ncvar_def(name = "polygon_id",
-                                           units='1',
-                                           dim = list(FFP_dim_inst), 
-                                           missval = NULL,
-                                           longname = paste0('id of each polygon referred to the ', which.FFP.R, '% isoplete'),
-                                           prec = "integer")
+            FFP_var_id <- ncvar_def(name = "polygon_id",
+                                    units='1',
+                                    dim = FFP_dim_inst, 
+                                    missval = NULL,
+                                    longname = paste0('id of each polygon referred to the ', which.FFP.R, '% isoplete'),
+                                    prec = "integer")
             
             
             # NC creation if isopleth is desired
-            ffp.ncout <- ncdf4::nc_create(filename = ffp.ncfname, 
-                                          vars = list(FFP_mtx30_def, 
-                                                      FFP_var_id,
-                                                      FFP_var_time,
-                                                      FFP_var_QC, 
-                                                      FFP_var_area, 
-                                                      FFP_var_geomc, 
-                                                      FFP_var_proj, 
-                                                      FFP_var_nodes, 
-                                                      FFP_var_nodeX, 
-                                                      FFP_var_nodeY, 
-                                                      FFP_var_ECoord
-                                          ), force_v4 = TRUE)
+            ffp.ncout <- nc_create(filename = ffp.ncfname, 
+                                   vars = list(FFP_mtx30_def, 
+                                               FFP_var_id,
+                                               FFP_var_time,
+                                               FFP_var_QC, 
+                                               FFP_var_area, 
+                                               FFP_var_geomc, 
+                                               FFP_var_proj, 
+                                               FFP_var_nodes, 
+                                               FFP_var_nodeX, 
+                                               FFP_var_nodeY, 
+                                               FFP_var_ECoord), 
+                                   force_v4 = TRUE)
           } else {
             
             # NC creation if isopleth is not desired
-            ffp.ncout <- ncdf4::nc_create(filename = ffp.ncfname,
-                                          vars = list(FFP_mtx30_def,
-                                                      FFP_var_proj, 
-                                                      FFP_var_QC,
-                                                      FFP_var_ECoord
-                                          ), force_v4 = TRUE)
+            ffp.ncout <- nc_create(filename = ffp.ncfname,
+                                   vars = list(FFP_mtx30_def,
+                                               FFP_var_proj, 
+                                               FFP_var_QC,
+                                               FFP_var_ECoord), 
+                                   force_v4 = TRUE)
             
           }
           
@@ -912,35 +920,37 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           # 3.3 # Put variables into the file --------------- 
           
           # FFP_mtx30_def
-          ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_mtx30_def, vals = FFP.array) ## Array
+          ncvar_put(nc = ffp.ncout, varid = FFP_mtx30_def, vals = FFP.array) ## Array
           
           # FFP_var_ECoord
-          ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_ECoord, 
-                           vals = c(FFP.input.list$EC_Tower_x, FFP.input.list$EC_Tower_y)) ## Observation time
+          ncvar_put(nc = ffp.ncout, varid = FFP_var_ECoord, 
+                    vals = c(FFP.input.list$EC_Tower_x, FFP.input.list$EC_Tower_y)) ## Observation time
           
           # FFP_var_QC 
-          ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_QC, vals = FFP.input.list$QC_Flag) ## Flag
+          ncvar_put(nc = ffp.ncout, varid = FFP_var_QC, 
+                    vals = FFP.input.list$QC_Flag) ## Flag
+          
           
           # Additional variables related to isopleth
           if(return.isopleth) {  
             
             # FFP_var_id 
-            ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_id, vals = FFP.input.list$polygon_index) ## Polygon ID
+            ncvar_put(nc = ffp.ncout, varid = FFP_var_id, vals = FFP.input.list$polygon_index) ## Polygon ID
             
             # FFP_var_nodes 
-            ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_nodes, vals = FFP.input.list$nodes_number_polygon) ## Number of nodes
+            ncvar_put(nc = ffp.ncout, varid = FFP_var_nodes, vals = FFP.input.list$nodes_number_polygon) ## Number of nodes
             
             # FFP_var_nodeX
-            ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_nodeX, vals = FFP.input.list$nodes_x) ## Nodes coord x
+            ncvar_put(nc = ffp.ncout, varid = FFP_var_nodeX, vals = FFP.input.list$nodes_x) ## Nodes coord x
             
             # FFP_var_nodeY 
-            ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_nodeY, vals = FFP.input.list$nodes_y) ## Nodes coord y
+            ncvar_put(nc = ffp.ncout, varid = FFP_var_nodeY, vals = FFP.input.list$nodes_y) ## Nodes coord y
             
             # FFP_var_area
-            ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_area, vals = FFP.input.list$polygon_area) ## Pol area
+            ncvar_put(nc = ffp.ncout, varid = FFP_var_area, vals = FFP.input.list$polygon_area) ## Pol area
             
             # FFP_var_time
-            ncdf4::ncvar_put(nc = ffp.ncout, varid = FFP_var_time, vals = FFP.input.list$time) ## Observation time
+            ncvar_put(nc = ffp.ncout, varid = FFP_var_time, vals = FFP.input.list$time) ## Observation time
             
           }
           
@@ -995,24 +1005,32 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           
           
           # FFP_mtx30_def
-          ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "grid_mapping", 
+          ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "grid_mapping", 
                            attval = 'UTM_Coordinate_System')
-          ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "coordinates", 
+          ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "coordinates", 
                            attval = 'x y')
+          
+          
+          # Name of xy 
+          ncatt_put(ffp.ncout, varid = "x", attname = "standard_name", 
+                           attval = "projection_x_coordinate")
+          ncatt_put(ffp.ncout, varid = "y", attname = "standard_name", 
+                           attval = "projection_y_coordinate")
+
           
           if(any(FFP.input.list[['QC_Flag']]!=1))
             
           {
-            ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "scale_factor", 
+            ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "scale_factor", 
                              attval = scale.offset['sf'])
-            ncdf4::ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "add_offset", 
+            ncatt_put(nc = ffp.ncout, varid = ffp.dfname, attname = "add_offset", 
                              attval = scale.offset['ofst'])
           }
 
                          
           # QC # 
-          ncdf4::ncatt_put(ffp.ncout, varid = "quality_flag", attname = "standard_name",
-                           attval='quality_flag')
+          ncatt_put(ffp.ncout, varid = "quality_flag", attname = "standard_name",
+                    attval='quality_flag')
           
           if(return.isopleth) { 
             
@@ -1026,58 +1044,61 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
             ncatt_put(nc = ffp.ncout, varid = "geometry_container", attname = "grid_mapping", 
                       attval = 'UTM_Coordinate_System')
             
+            
             # QC # 
-            ncdf4::ncatt_put(ffp.ncout, varid = "quality_flag", attname = "standard_name",
-                             attval='quality_flag')
-            ncdf4::ncatt_put(ffp.ncout, varid = "quality_flag", attname = "grid_mapping",
-                             attval='UTM_Coordinate_System')
-            ncdf4::ncatt_put(ffp.ncout, varid = "quality_flag", attname = "geometry",
-                             attval='geometry_container')
+            ncatt_put(ffp.ncout, varid = "quality_flag", attname = "standard_name",
+                      attval='quality_flag')
+            ncatt_put(ffp.ncout, varid = "quality_flag", attname = "grid_mapping",
+                      attval='UTM_Coordinate_System')
+            ncatt_put(ffp.ncout, varid = "quality_flag", attname = "geometry",
+                      attval='geometry_container')
             
             
             # polygon_id # Timeseries identifier
-            ncdf4::ncatt_put(ffp.ncout, varid = "polygon_id", attname = "grid_mapping",
-                             attval='UTM_Coordinate_System')
-            ncdf4::ncatt_put(ffp.ncout, varid = "polygon_id", attname = "geometry",
-                             attval='geometry_container')
-            ncdf4::ncatt_put(ffp.ncout, varid = "polygon_id", attname = "cf_role",
-                             attval='timeseries_id')
+            ncatt_put(ffp.ncout, varid = "polygon_id", attname = "grid_mapping",
+                      attval='UTM_Coordinate_System')
+            ncatt_put(ffp.ncout, varid = "polygon_id", attname = "geometry",
+                      attval='geometry_container')
+            ncatt_put(ffp.ncout, varid = "polygon_id", attname = "cf_role",
+                      attval='timeseries_id')
             
             
             # Name of xy 
-            ncdf4::ncatt_put(ffp.ncout, varid = "x", attname = "standard_name", 
-                             attval = "projection_x_coordinate")
-            ncdf4::ncatt_put(ffp.ncout, varid = "y", attname = "standard_name", 
-                             attval = "projection_y_coordinate")
+            ncatt_put(ffp.ncout, varid = "x", attname = "standard_name", 
+                      attval = "projection_x_coordinate")
+            ncatt_put(ffp.ncout, varid = "y", attname = "standard_name", 
+                      attval = "projection_y_coordinate")
             
             
             # FFP_var_time
-            ncdf4::ncatt_put(ffp.ncout, varid = "observation_time", attname = "grid_mapping",
-                             attval='UTM_Coordinate_System')
-            ncdf4::ncatt_put(ffp.ncout, varid = "observation_time", attname = "geometry",
-                             attval='geometry_container')
+            ncatt_put(ffp.ncout, varid = "observation_time", attname = "grid_mapping",
+                      attval='UTM_Coordinate_System')
+            ncatt_put(ffp.ncout, varid = "observation_time", attname = "geometry",
+                      attval='geometry_container')
             
             
             # FFP_var_nodes # Additional specifications not required #
             
             
             # FFP_var_nodeX
-            ncdf4::ncatt_put(ffp.ncout, varid = "nodes_x", attname = "axis",
-                             attval='X')
-            ncdf4::ncatt_put(ffp.ncout, varid = "nodes_x", attname = "units",
-                             attval='m')
+            ncatt_put(ffp.ncout, varid = "nodes_x", attname = "axis",
+                      attval='X')
+            ncatt_put(ffp.ncout, varid = "nodes_x", attname = "units",
+                      attval='m')
+            
             
             # FFP_var_nodeY
-            ncdf4::ncatt_put(ffp.ncout, varid = "nodes_y", attname = "axis",
-                             attval='Y')
-            ncdf4::ncatt_put(ffp.ncout, varid = "nodes_y", attname = "units",
-                             attval='m')
+            ncatt_put(ffp.ncout, varid = "nodes_y", attname = "axis",
+                      attval='Y')
+            ncatt_put(ffp.ncout, varid = "nodes_y", attname = "units",
+                      attval='m')
+            
             
             # FFP_var_area
-            ncdf4::ncatt_put(ffp.ncout, varid = "polygon_area", attname = "grid_mapping",
-                             attval='UTM_Coordinate_System')
-            ncdf4::ncatt_put(ffp.ncout, varid = "polygon_area", attname = "geometry",
-                             attval='geometry_container')
+            ncatt_put(ffp.ncout, varid = "polygon_area", attname = "grid_mapping",
+                      attval='UTM_Coordinate_System')
+            ncatt_put(ffp.ncout, varid = "polygon_area", attname = "geometry",
+                      attval='geometry_container')
             
             
             # Feature type #
@@ -1098,8 +1119,9 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           
           # Contact
           ncatt_put(ffp.ncout, 0, "Contact", 
-                    "Giacomo Nicolini and Luca Di Fiore, ICOS Ecosystem Thematic Center, Euro-Mediterranean 
-                            Center for Climate Change. Email: giacomo.nicolini@cmcc.it; luca.difiore@cmcc.it")
+                    paste0("Giacomo Nicolini and Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
+                           "Euro-Mediterranean Center for Climate Change. ", 
+                           "Email: giacomo.nicolini@cmcc.it; luca.difiore@cmcc.it"))
           
           # Conventions
           ncatt_put(ffp.ncout, 0, "Conventions", 
@@ -1111,15 +1133,14 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           
           # creator
           ncatt_put(ffp.ncout, 0, "creator", 
-                    "Giacomo Nicolini, ICOS Ecosystem Thematic Center, 
-                            Euro-Mediterranean Center for Climate Change, Viterbo, Italy;
-                            Luca Di Fiore, ICOS Ecosystem Thematic Center, 
-                            Euro-Mediterranean Center for Climate Change, Viterbo, Italy")
+                    paste0("Giacomo Nicolini, ICOS Ecosystem Thematic Center, ", 
+                           "Euro-Mediterranean Center for Climate Change, Viterbo, Italy; ",
+                           "Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
+                           "Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
           
           # institution
           ncatt_put(ffp.ncout, 0, "institution", 
-                    "ICOS Ecosystem Thematic Center, 
-                            Euro-Mediterranean Center for Climate Change, Viterbo, Italy")
+                    "ICOS Ecosystem Thematic Center, Euro-Mediterranean Center for Climate Change, Viterbo, Italy")
           
           # keywords
           ncatt_put(ffp.ncout, 0, "keywords", 
@@ -1174,11 +1195,11 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           
           # geospatial_lat_resolution
           ncatt_put(ffp.ncout, 0, "geospatial_lat_resolution", 
-                    "1 m")
+                    paste0(dx, " m"))
           
           # geospatial_lon_resolution
           ncatt_put(ffp.ncout, 0, "geospatial_lon_resolution", 
-                    "1 m")
+                    paste0(dx, " m"))
           
           # geospatial_vertical_resolution
           #ncatt_put(ffp.ncout, 0, "geospatial_vertical_resolution", 
@@ -1195,10 +1216,10 @@ doFFP=function(FFP.input.df=NULL,        # input dataframe
           
           # Contributors
           ncatt_put(ffp.ncout, 0, "Contributors", 
-                    "Giacomo Nicolini, ICOS Ecosystem Thematic Center, 
-                            Euro-Mediterranean Center for Climate Change, Viterbo, Italy;
-                            Luca Di Fiore, ICOS Ecosystem Thematic Center, 
-                            Euro-Mediterranean Center for Climate Change, Viterbo, Italy")
+                    paste0("Giacomo Nicolini, ICOS Ecosystem Thematic Center, ", 
+                          "Euro-Mediterranean Center for Climate Change, Viterbo, Italy; ",
+                          "Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
+                          "Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
           
           # FundingReference
           #ncatt_put(ffp.ncout, 0, "FundingReference",
