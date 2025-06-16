@@ -23,13 +23,6 @@ In the R working directory the function creates a folder named as the site ID an
 
 When specified, a 4-element list is returned, containing: site ID string; vector with EC tower lat/lon coordinates; PID; FFP input data frame. Depending on data and site characteristics, not all the elements can always be returned (e.g. PID, if not available when the ‘!TOC.csv’ file doesn't exist; FFP input table when not all the parameters are available).
 When the FFP input table is saved as CSV, ‘site_id’, ‘lat, ‘lon’ and ‘PID’ are added in the first 4 columns of the table.  
-
-<ins>Known issues</ins>:
-* For forest sites, the canopy height value extracted is the 75<sup>th</sup> percentile of its distribution. The 95<sup>th</sup> percentile should be used, but at the moment it is not available.
-* Canopy height values for croplands and wetlands are not available.
-<ul>
-Without the canopy height FFP can't be calculated. Both the issues will be solved with the next data release. 
-</ul>
  
 ## doFFP
 Starting from the input parameters (e.g. a CSV file or an R object returned by the CPtoFFPinput function), it saves in dedicated folders the daily Flux Footprints Predictions (FFP; Kljun et al., 2015) for a specific Eddy Covariance site. 
