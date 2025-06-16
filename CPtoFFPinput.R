@@ -161,28 +161,30 @@ CPtoFFPinput = function(zip.file = NULL,
       #map(~ .x %>% write_csv(paste0(.x$VARIABLE_GROUP %>% unique(), '.csv'))) # CSV write
       
       # Force DF to have date and spp columns, filled with NAs
-      cols = c(HEIGHTC_DATE = NA, HEIGHTC_SPP = NA, HEIGHTC_DATE_START = NA)
+      cols = c(HEIGHTC_DATE = NA, HEIGHTC_SPP = NA, HEIGHTC_DATE_START = NA, HEIGHTC_VEG_STATUS = "Alive")
       
       # Extracting canopy height from ancillary DF
-      if (any(Ancillary.df[['GRP_HEIGHTC']]$HEIGHTC_STATISTIC == '75th Percentile'))
-        
+      if(length(Ancillary.df[['GRP_HEIGHTC']][['HEIGHTC_APPROACH']] %>% unique()) == 1)
       {
-        # Get the 75% percentile of HC (GRP-HEIGHTC)
         hc.df.tmp = Ancillary.df[['GRP_HEIGHTC']] %>%
-          tibble::add_column(., !!!cols[!names(cols) %in% names(.)]) %>%
-          filter(HEIGHTC_STATISTIC == '75th Percentile' & grepl('CP', HEIGHTC_APPROACH) & is.na(HEIGHTC_SPP)) %>%
+          tibble::add_column(., !!!cols[!names(cols) %in% names(.)]) %>% # Add columns if not available # 
+          filter(HEIGHTC_STATISTIC == '90th Percentile' & 
+                   is.na(HEIGHTC_SPP)) %>% 
           mutate(HEIGHTC_DATE = case_when(
             is.na(HEIGHTC_DATE) ~ HEIGHTC_DATE_START, # sometimes HEIGHTC_DATE is NA
             TRUE ~ HEIGHTC_DATE)) %>%
-          select(HEIGHTC_DATE , HEIGHTC) %>%
+          select(HEIGHTC_DATE, HEIGHTC) %>%
           rename('TIMESTAMP' = 'HEIGHTC_DATE', 'hc' = 'HEIGHTC') %>%
           mutate(TIMESTAMP = strptime(TIMESTAMP, format = '%Y%m%d', tz = 'GMT'), hc = as.numeric(hc))
         
-      } else {
-        # Get the mean HC (GRP-HEIGHTC)
-        hc.df.tmp = Ancillary.df[['GRP_HEIGHTC']] %>% 
-          filter(HEIGHTC_STATISTIC == 'Mean') %>%
-          tibble::add_column(., !!!cols[!names(cols) %in% names(.)]) %>%
+      } else
+      {
+        hc.df.tmp = Ancillary.df[['GRP_HEIGHTC']] %>%
+          tibble::add_column(., !!!cols[!names(cols) %in% names(.)]) %>% # Add columns if not available # 
+          filter(HEIGHTC_STATISTIC == '90th Percentile' & 
+                   is.na(HEIGHTC_SPP) & 
+                   grepl('CP', HEIGHTC_APPROACH) & 
+                   HEIGHTC_VEG_STATUS == 'Alive') %>% 
           mutate(HEIGHTC_DATE = case_when(
             is.na(HEIGHTC_DATE) ~ HEIGHTC_DATE_START, # sometimes HEIGHTC_DATE is NA
             TRUE ~ HEIGHTC_DATE)) %>%
@@ -240,11 +242,6 @@ CPtoFFPinput = function(zip.file = NULL,
       
       # Change nodata values (from -9999 to NA)
       DF_Input[DF_Input == -9999] = NA
-      
-      # Where fluxes variables are NA, set heigh variables NA
-      DF_Input = DF_Input %>%
-        mutate(across(c('hm', 'hc', 'd', 'z0', 'zm'),
-                      ~ replace(., !complete.cases(DF_Input[c('umean', 'ol', 'sigmav', 'ustar', 'wind_dir')]), NA)))
       
       # Filter between start and end dates
       if (!is.null(start.date) & is.null(end.date))
