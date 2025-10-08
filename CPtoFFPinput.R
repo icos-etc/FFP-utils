@@ -37,11 +37,11 @@ CPtoFFPinput = function(zip.file = NULL,
     
   {
     # List file name within the zip folder #
-    file_list = utils::unzip(zip.file, list = T) %>% pull(Name)
+    file_list <- utils::unzip(zip.file, list = T) %>% pull(Name)
     
     # -- SITE ID -- #
-    site.ID = read_csv(unz(zip.file, # Zip connection
-                           file_list[str_detect(file_list, pattern = 'SITEINFO')]), col_types = cols()) %>%
+    site.ID <- read_csv(unz(zip.file, # Zip connection
+                            file_list[str_detect(file_list, pattern = 'SITEINFO')]), col_types = cols()) %>%
       pull(SITE_ID) %>% unique()
     
     # -- STARTING MESSAGE -- #
@@ -50,30 +50,29 @@ CPtoFFPinput = function(zip.file = NULL,
     cat('\n********************************************************************\n')
     
     # -- COORDINATES -- #
-    Coords = read_csv(unz(zip.file, # Zip connection
-                          file_list[grepl(file_list, pattern = 'SITEINFO')]), col_types = 'ccccc')
+    Coords <- read_csv(unz(zip.file, # Zip connection
+                           file_list[grepl(file_list, pattern = 'SITEINFO')]), col_types = 'ccccc')
     
-    Coords.df = Coords %>% filter(VARIABLE %in% c('LOCATION_LONG', 'LOCATION_LAT')) %>%
+    Coords.df <- Coords %>% filter(VARIABLE %in% c('LOCATION_LONG', 'LOCATION_LAT')) %>% 
       select(VARIABLE, DATAVALUE) %>%
-      mutate(VARIABLE = ifelse(str_detect(string = VARIABLE, pattern = 'LAT'), yes = 'lat', no = 'lon'),
+      mutate(VARIABLE = ifelse(str_detect(string = VARIABLE, pattern = 'LAT'), yes = 'lat', no = 'lon'), 
              DATAVALUE = as.numeric(DATAVALUE))
     
     # Store coordinates as a named vector
-    Coords.vec = Coords.df %>% pull(DATAVALUE, VARIABLE)
+    Coords.vec <- Coords.df %>% pull(DATAVALUE, VARIABLE)
     
     # -- PID -- #
-    PID = NULL
-    TOC = list.files(path = dirname(zip.file), pattern = 'TOC', full.names = T)
+    PID <- NULL
+    TOC <- list.files(path = dirname(zip.file), pattern = 'TOC', full.names = T)
     
     if (length(TOC) == 1)
       
     {
       # Read the TOC file and extract the PID for the specific site
-      PID = read_csv(TOC, name_repair = function(x) x %>% str_replace(pattern = ' ', replacement = '_'),
-                     col_types = cols()) %>%
-        rowwise() %>%
-        mutate(SITE_CODE = (str_split(File_name, pattern = '_'))[[1]][2]) %>%
-        filter(SITE_CODE %in% site.ID) %>%
+      PID <- read_csv(TOC, name_repair = function(x) x %>% str_replace(pattern = ' ', replacement = '_'), col_types = cols()) %>%
+        rowwise() %>% 
+        mutate(SITE_CODE = (str_split(File_name, pattern = '_'))[[1]][2]) %>% 
+        filter(SITE_CODE %in% site.ID) %>% 
         pull(PID)
       
       # If more than one TOC is available, PID is set to NA
@@ -87,26 +86,66 @@ CPtoFFPinput = function(zip.file = NULL,
     }
     
     
+    
     # -- DATA AVAILABILITY CHECK -- # -- FLUXES VARIABLES -- #
     
     # Create an empty dataframe (to prevent failures of the main dataframe processing part) 
     DF_Input=data.frame()
     
-    Fluxes = read_csv(unz(zip.file, # Zip connection
-                          file_list[str_detect(file_list, pattern = 'FLUXES') &
-                                      str_detect(file_list, pattern = 'VARINFO', negate = T)]), col_types = 'ccccc')
+    Fluxes <- read_csv(unz(zip.file, # Zip connection
+                           file_list[str_detect(file_list, pattern = 'FLUXES') & 
+                                       str_detect(file_list, pattern = 'VARINFO', negate = T)]), col_types = 'ccccc')
     
-    Fluxvar = c('WS', 'MO_LENGTH', 'V_SIGMA', 'USTAR', 'WD', 'PBLH')
+    Fluxvar <- c('WS', 'MO_LENGTH', 'V_SIGMA', 'USTAR', 'WD', 'PBLH')
     
-    # Warn if some columns are missing # Don't stop the function, check other parameters too 
-    if (any(!(Fluxvar %in% colnames(Fluxes))))
+    # Wind variables check 
+    if(!(any(colnames(Fluxes) %in% c('WD', 'WS')))) # If WS/WD are not in the fluxes, check in the meteo file # 
       
     {
-      cat(warn(paste0('\n [!] ', bold(str_flatten_comma(Fluxvar[!(Fluxvar %in% (colnames(Fluxes)))])),
-                      ' are not available for the ', site.ID, ' station. FFP input table is not created.\n')))
+      # Meteo # 
+      Meteo <- read_csv(unz(zip.file, # Zip connection
+                            file_list[str_detect(file_list, pattern = '_METEO_') & 
+                                        str_detect(file_list, pattern = 'VARINFO', negate = T)]), col_types = 'ccccc')
+    }  
+    
+    # Warning message #     
+    if(exists('Meteo'))
+    {
+      if (any(!(Fluxvar %in% c(colnames(Fluxes), colnames(Meteo)))))
+      {
+        if (sum(!(Fluxvar %in% c(colnames(Fluxes), colnames(Meteo)))) > 1)
+        {
+          cat(warn(paste0('\n [!] ', 
+                          bold(str_flatten_comma(Fluxvar[!(Fluxvar %in% c(colnames(Fluxes), colnames(Meteo)))])),
+                          ' are not available for the ', site.ID, ' station. FFP input table is not created.\n')))
+          
+        } else if (sum(!(Fluxvar %in% c(colnames(Fluxes), colnames(Meteo)))) == 1)
+        {
+          cat(warn(paste0('\n [!] ', 
+                          bold(str_flatten_comma(Fluxvar[!(Fluxvar %in% c(colnames(Fluxes), colnames(Meteo)))])),
+                          ' is not available for the ', site.ID, ' station. FFP input table is not created.\n')))
+        }
+        
+        DF_Input <- NULL
+      }
+    } else if (any(!(Fluxvar %in% colnames(Fluxes))))
+      {
       
-      DF_Input = NULL
-    } 
+      if (sum(!(Fluxvar %in% colnames(Fluxes))) > 1)
+      {
+        cat(warn(paste0('\n [!] ', 
+                        bold(str_flatten_comma(Fluxvar[!(Fluxvar %in% colnames(Fluxes))])),
+                        ' are not available for the ', site.ID, ' station. FFP input table is not created.\n')))
+        
+      } else if (sum(!(Fluxvar %in% colnames(Fluxes))) == 1)
+      {
+        cat(warn(paste0('\n [!] ', 
+                        bold(str_flatten_comma(Fluxvar[!(Fluxvar %in% colnames(Fluxes))])),
+                        ' is not available for the ', site.ID, ' station. FFP input table is not created.\n')))
+      }
+        DF_Input <- NULL
+      }
+    
     
     
     # -- DATA AVAILABILITY CHECK -- # -- HC -- #
@@ -118,14 +157,13 @@ CPtoFFPinput = function(zip.file = NULL,
       cat(warn(paste0("\n [!] Canopy height can't be retrieved (ancillary file doesn't exist) for the ",
                       site.ID, " station. FFP input table is not created.\n")))
       
-      DF_Input = NULL
+      DF_Input <- NULL
       
     } else {
-      # Read the file
       
       # Canopy height # Spread ancillary data by group
-      Ancillary = read_csv(unz(zip.file, # Zip connection
-                               file_list[str_detect(file_list, pattern = 'ANCILLARY')]), col_types = 'ccccc')
+      Ancillary <- read_csv(unz(zip.file, # Zip connection
+                                file_list[str_detect(file_list, pattern = 'ANCILLARY')]), col_types = 'ccccc')
       
       # Check for the height group
       if (all(!(Ancillary$VARIABLE_GROUP %in% "GRP_HEIGHTC"))) # If group doesn't exist give a warning #
@@ -134,7 +172,7 @@ CPtoFFPinput = function(zip.file = NULL,
         cat(warn(paste0("\n [!] Canopy height can't be retrieved from the ancillary file for the ",
                         site.ID, " station. FFP input table is not created.\n")))
         
-        DF_Input = NULL
+        DF_Input <- NULL
         
       } # Height availability within ancillary ending...
       
@@ -147,114 +185,154 @@ CPtoFFPinput = function(zip.file = NULL,
       
     {
       # Format the time span to keep only the start
-      Fluxes$TIMESTAMP = strptime(Fluxes$TIMESTAMP_START, format = '%Y%m%d%H%M', tz = 'GMT')
+      Fluxes$TIMESTAMP <- strptime(Fluxes$TIMESTAMP_START, format = '%Y%m%d%H%M', tz = 'GMT')
       
       # Select the required columns # c('umean', 'ol', 'sigmav', 'ustar', 'wind_dir', 'h')
-      Fluxes.df = Fluxes %>% select(any_of(c('TIMESTAMP', Fluxvar)))
+      Fluxes.df <- Fluxes %>% select(any_of(c('TIMESTAMP', Fluxvar)))
+      
+      # Add meteo data if exist # 
+      if(exists('Meteo'))
+      {
+        Meteo$TIMESTAMP <- strptime(Meteo$TIMESTAMP_START, format = '%Y%m%d%H%M', tz = 'GMT')
+        
+        # Select the required columns # c('umean', 'ol', 'sigmav', 'ustar', 'wind_dir', 'h')
+        Meteo.df <- Meteo %>% select(any_of(c('TIMESTAMP', Fluxvar)))
+        
+        # Join the variables # 
+        Fluxes.df <- Fluxes.df %>% left_join(Meteo.df, by='TIMESTAMP')
+      }
+      
       
       
       # -- DATA PROCESSING -- # -- HC -- #
       
-      Ancillary.df = Ancillary %>%
+      Ancillary.df <- Ancillary %>%
         split(.$VARIABLE_GROUP) %>%
         map( ~ .x %>% spread(key = VARIABLE, value = DATAVALUE)) #%>%
-      #map(~ .x %>% write_csv(paste0(.x$VARIABLE_GROUP %>% unique(), '.csv'))) # CSV write
+        #map(~ .x %>% write_csv(paste0(.x$VARIABLE_GROUP %>% unique(), '.csv'))) # CSV write
       
       # Force DF to have date and spp columns, filled with NAs
-      cols = c(HEIGHTC_DATE = NA, HEIGHTC_SPP = NA, HEIGHTC_DATE_START = NA, HEIGHTC_VEG_STATUS = "Alive")
+      cols <- c(HEIGHTC_DATE = NA, HEIGHTC_SPP = NA, HEIGHTC_DATE_START = NA, HEIGHTC_VEG_STATUS = "Alive")
       
-      # Extracting canopy height from ancillary DF
-      if(length(Ancillary.df[['GRP_HEIGHTC']][['HEIGHTC_APPROACH']] %>% unique()) == 1)
+      # DF filter to keep only HC
+      GRP_HEIGHTC_DF <- Ancillary.df[['GRP_HEIGHTC']] %>% 
+        tibble::add_column(., !!!cols[!names(cols) %in% names(.)]) # Add columns if not available # 
+      
+      # If HC 90th percentile is available
+      if(any(GRP_HEIGHTC_DF$HEIGHTC_STATISTIC %in% "90th Percentile")) 
+        
       {
-        hc.df.tmp = Ancillary.df[['GRP_HEIGHTC']] %>%
-          tibble::add_column(., !!!cols[!names(cols) %in% names(.)]) %>% # Add columns if not available # 
-          filter(HEIGHTC_STATISTIC == '90th Percentile' & 
-                   is.na(HEIGHTC_SPP)) %>% 
-          mutate(HEIGHTC_DATE = case_when(
-            is.na(HEIGHTC_DATE) ~ HEIGHTC_DATE_START, # sometimes HEIGHTC_DATE is NA
-            TRUE ~ HEIGHTC_DATE)) %>%
+        hc.df.tmp <- GRP_HEIGHTC_DF %>%
+          filter(HEIGHTC_STATISTIC == '90th Percentile' & is.na(HEIGHTC_SPP) & HEIGHTC_VEG_STATUS == 'Alive') %>% 
+          mutate(HEIGHTC_DATE = case_when(is.na(HEIGHTC_DATE) ~ HEIGHTC_DATE_START, # sometimes HEIGHTC_DATE is NA
+                                          TRUE ~ HEIGHTC_DATE)) %>%
           select(HEIGHTC_DATE, HEIGHTC) %>%
           rename('TIMESTAMP' = 'HEIGHTC_DATE', 'hc' = 'HEIGHTC') %>%
           mutate(TIMESTAMP = strptime(TIMESTAMP, format = '%Y%m%d', tz = 'GMT'), hc = as.numeric(hc))
         
-      } else
+      } else # HC 90th percentile unavailable (mean is always available) # 
+        
       {
-        hc.df.tmp = Ancillary.df[['GRP_HEIGHTC']] %>%
-          tibble::add_column(., !!!cols[!names(cols) %in% names(.)]) %>% # Add columns if not available # 
-          filter(HEIGHTC_STATISTIC == '90th Percentile' & 
-                   is.na(HEIGHTC_SPP) & 
-                   grepl('CP', HEIGHTC_APPROACH) & 
-                   HEIGHTC_VEG_STATUS == 'Alive') %>% 
-          mutate(HEIGHTC_DATE = case_when(
-            is.na(HEIGHTC_DATE) ~ HEIGHTC_DATE_START, # sometimes HEIGHTC_DATE is NA
-            TRUE ~ HEIGHTC_DATE)) %>%
-          select(HEIGHTC_DATE , HEIGHTC) %>%
-          rename('TIMESTAMP' = 'HEIGHTC_DATE', 'hc' = 'HEIGHTC') %>%
+        # Build the DF
+        hc.df.tmp <- GRP_HEIGHTC_DF %>%
+          filter(HEIGHTC_STATISTIC == 'Mean' & is.na(HEIGHTC_SPP) & HEIGHTC_VEG_STATUS == 'Alive') %>% 
+          mutate(HEIGHTC_DATE = case_when(is.na(HEIGHTC_DATE) ~ HEIGHTC_DATE_START, # sometimes HEIGHTC_DATE is NA
+                                          TRUE ~ HEIGHTC_DATE)) %>%
+          select(HEIGHTC_DATE, HEIGHTC) %>%
+          rename('TIMESTAMP' = 'HEIGHTC_DATE', 'hc' = 'HEIGHTC') %>% 
+          mutate(TIMESTAMP=case_when(nchar(TIMESTAMP)==6 ~ paste0(TIMESTAMP, '15'), # Missing day 
+                                     nchar(TIMESTAMP)==4 ~ paste0(TIMESTAMP, '0615'), # Missing month 
+                                     T ~ TIMESTAMP))
+        
+        # Format timestamp and height 
+        hc.df.tmp <- hc.df.tmp %>% 
           mutate(TIMESTAMP = strptime(TIMESTAMP, format = '%Y%m%d', tz = 'GMT'), hc = as.numeric(hc))
+        
+        # HC warning (average is the only measurement available)
+        cat(warn(paste0("\n [!] Canopy height value extracted from the site average for the ",
+                        site.ID, " station. FFP extent is underestimated.\n")))
+        
+      }
+      
+      # If multiple HC obs. exists, take the average # 
+      if(any(duplicated(hc.df.tmp$TIMESTAMP))) 
+        
+      {
+        hc.df.tmp <- hc.df.tmp %>% 
+          group_by(TIMESTAMP) %>% 
+          summarise(hc=mean(hc, na.rm=T))
       }
       
       # Create a dummy DF with the full dates and join it with the first date of measurement
-      hc.df = data.frame(TIMESTAMP = seq.POSIXt(min(hc.df.tmp$TIMESTAMP), max(Fluxes.df$TIMESTAMP), '30 min')) %>%
+      hc.df <- data.frame(TIMESTAMP = seq.POSIXt(min(hc.df.tmp$TIMESTAMP), max(Fluxes.df$TIMESTAMP), '30 min')) %>%
         left_join(hc.df.tmp, by = 'TIMESTAMP')
       
       # Fill the dataframe
-      hc.df = fill(hc.df, hc, .direction = 'down')
+      hc.df <- fill(hc.df, hc, .direction = 'down')
+      
+      # Correction: if canopy height is zero, correct to 0.2 # Otherwise the FFP fails # 
+      hc.df <- hc.df %>% mutate(hc=ifelse(hc == 0, yes=0.2, no=hc))
+    
       
       
       # -- DATA PROCESSING -- # -- HM -- #
       
       # Using USTAR as reference variable for HM # 
-      VarInfo = read_csv(unz(zip.file, # Zip connection
-                             file_list[str_detect(file_list, pattern = 'FLUXES') &
+      VarInfo <- read_csv(unz(zip.file, # Zip connection
+                              file_list[str_detect(file_list, pattern = 'FLUXES') &
                                          str_detect(file_list, pattern = 'VARINFO')]), col_types = 'ccccc') %>%
         spread(key = VARIABLE, value = DATAVALUE)
       
       # Extract unique pair(s) of HM and corresponding date (excluding NAs)
-      hm.df.tmp = VarInfo %>%
+      hm.df.tmp <- VarInfo %>%
         filter(VAR_INFO_VARNAME == 'USTAR') %>% 
         select(VAR_INFO_DATE, VAR_INFO_HEIGHT) %>% unique() %>% na.omit() %>%
         rename('TIMESTAMP' = 'VAR_INFO_DATE', 'hm' = 'VAR_INFO_HEIGHT') %>%
         mutate(TIMESTAMP = strptime(TIMESTAMP, format = '%Y%m%d', tz = 'GMT'), hm = as.numeric(hm))
       
       # Create a dummy DF with the full dates and join it with the first date of
-      hm.df = data.frame(TIMESTAMP = seq.POSIXt(min(Fluxes.df$TIMESTAMP), max(Fluxes.df$TIMESTAMP), '30 min')) %>%
+      hm.df <- data.frame(TIMESTAMP = seq.POSIXt(min(Fluxes.df$TIMESTAMP), max(Fluxes.df$TIMESTAMP), '30 min')) %>%
         left_join(hm.df.tmp, by = 'TIMESTAMP')
       
       # Fill the dataframe
-      hm.df = fill(hm.df, hm, .direction = 'down')
+      hm.df <- fill(hm.df, hm, .direction = 'down')
+      
       
       
       # --- FULL JOIN --- #
-      DF_Input = Fluxes.df %>% left_join(hm.df, by = 'TIMESTAMP') %>% left_join(hc.df, by = 'TIMESTAMP') %>%
+      DF_Input <- Fluxes.df %>% left_join(hm.df, by = 'TIMESTAMP') %>% 
+        left_join(hc.df, by = 'TIMESTAMP') %>%
         na.omit()
       
       
+      
       # -- D, Z0, Zm -- #
-      DF_Input = DF_Input %>% mutate(d = 2 / 3 * hc, z0 = 0.15 * hc, zm = hm - d)
+      DF_Input <- DF_Input %>% mutate(d = 2 / 3 * hc, z0 = 0.15 * hc, zm = hm - d)
       
       # Order and rename variables #
-      DF_Input = DF_Input %>% select(TIMESTAMP, hm, hc, d, z0, zm, WS, MO_LENGTH, V_SIGMA, USTAR, WD, PBLH) %>%
+      DF_Input <- DF_Input %>% select(TIMESTAMP, hm, hc, d, z0, zm, WS, MO_LENGTH, V_SIGMA, USTAR, WD, PBLH) %>%
         rename('umean' = 'WS', 'ol' = 'MO_LENGTH', 'sigmav' = 'V_SIGMA', 'ustar' = 'USTAR', 'wind_dir' = 'WD',
                'PBL' = 'PBLH')
+      
       
       
       # -- DF REFINING -- #
       
       # Change nodata values (from -9999 to NA)
-      DF_Input[DF_Input == -9999] = NA
+      DF_Input[DF_Input == -9999] <- NA
       
       # Filter between start and end dates
       if (!is.null(start.date) & is.null(end.date))
       {
-        DF_Input = DF_Input %>% filter(as_date(TIMESTAMP) >= start.date)
+        DF_Input <- DF_Input %>% filter(as_date(TIMESTAMP) >= start.date)
         
       } else if (is.null(start.date) & !is.null(end.date))
       {
-        DF_Input = DF_Input %>% filter(as_date(TIMESTAMP) <= end.date)
+        DF_Input <- DF_Input %>% filter(as_date(TIMESTAMP) <= end.date)
         
       } else if (!is.null(start.date) & !is.null(end.date))
       {
-        DF_Input = DF_Input %>% filter(as_date(TIMESTAMP) >= start.date & as_date(TIMESTAMP) <= end.date)
+        DF_Input <- DF_Input %>% filter(as_date(TIMESTAMP) >= start.date & as_date(TIMESTAMP) <= end.date)
       }
       
       # Check data overlap
@@ -264,7 +342,7 @@ CPtoFFPinput = function(zip.file = NULL,
         cat(warn(paste0("\n [!] No overlap between date window and dataframe timestamp for the ",
                         site.ID, " station. FFP input table is not created.\n")))
         
-        DF_Input = NULL
+        DF_Input <- NULL
       }
       
     } # data processing ending....
@@ -272,15 +350,15 @@ CPtoFFPinput = function(zip.file = NULL,
     
     # -- OUTPUT -- #
     
-    Model_Input = list()
+    Model_Input <- list()
     
-    Model_Input[['site_id']] = site.ID
-    Model_Input[['tower_coordinates']] = Coords.vec
-    Model_Input[['PID']] = PID
-    Model_Input[['FFP_input_parameters']] = DF_Input
+    Model_Input[['site_id']] <- site.ID
+    Model_Input[['tower_coordinates']] <- Coords.vec
+    Model_Input[['PID']] <- PID
+    Model_Input[['FFP_input_parameters']] <- DF_Input
     
     # Add the data as data frame
-    Model_DF = data.frame(
+    Model_DF <- data.frame(
       site_id = site.ID,
       lat = Coords.vec['lat'] %>% as.numeric(),
       lon = Coords.vec['lon'] %>% as.numeric(),
@@ -294,14 +372,14 @@ CPtoFFPinput = function(zip.file = NULL,
     ## EXISTING INPUT TABLE PROCESSING ------
   {
     # Get site code
-    site.ID = str_split(basename(FFP.input.table), pattern = '_')[[1]][1]
+    site.ID <- str_split(basename(FFP.input.table), pattern = '_')[[1]][1]
     
     cat(warn(paste0('\nNo zip file provided for the ', site.ID, ' station.')))
     cat(prog.mes(paste0('\nUsing FFP input table as input and built-in table for coordinates....')))
     cat(prog.mes(paste0('\nCreating internal list with filtered dataframe, site code, coordinates and, if available, PID....\n')))
     
     # Get built-in coordinates
-    Coords = data.frame(
+    Coords <- data.frame(
       site_id = c('DE-SfN', 'FI-Hyy', 'FR-Bil', 'SE-Svb', 'LMP', 'DE-HGT', 'IE-GtF', 'IT-Lsn', 'BE-Dor', 'IT-OXm', 
                   'SE-Nor', 'FI-Sii', 'IT-TrF', 'FI-Ouk', '58US', 'IZO', 'CZ-BK1', 'FKL', 'UK-AMo', 'NO-Hur', 
                   'CUXHAVEN', 'NO-SOOP-Bergen Kirkenes', 'FI-Tvm', 'MLH', 'FI-Sod', 'SSL', 'GF-Guy', 'IT-Ren', 'UTO', 
@@ -354,23 +432,24 @@ CPtoFFPinput = function(zip.file = NULL,
               5.67865, 2.1125, NA, 4.746234, NA, 23.95952, 13.4189, 13.708, -2.5399))
     
     # Extract coordinates of the site code
-    Coords = Coords %>% filter(site_id %in% site.ID)
-    Coords.vec = c(Coords %>% pull(lat), Coords %>% pull(lon))
+    Coords <- Coords %>% filter(site_id %in% site.ID)
+    Coords.vec <- c(Coords %>% pull(lat), Coords %>% pull(lon))
     
-    # Get DF_input (filename) and filter it according to start and end date
-    DF_Input = read_csv(FFP.input.table, col_types = cols())
+    
+    # -- DATE FILTERING -- #
+    DF_Input <- read_csv(FFP.input.table, col_types = cols())
     
     if (!is.null(start.date) & is.null(end.date))
     {
-      DF_Input = DF_Input %>% filter(as_date(TIMESTAMP) >= start.date)
+      DF_Input <- DF_Input %>% filter(as_date(TIMESTAMP) >= start.date)
       
     } else if (is.null(start.date) & !is.null(end.date))
     {
-      DF_Input = DF_Input %>% filter(as_date(TIMESTAMP) <= end.date)
+      DF_Input <- DF_Input %>% filter(as_date(TIMESTAMP) <= end.date)
       
     } else if (!is.null(start.date) & !is.null(end.date))
     {
-      DF_Input = DF_Input %>% filter(as_date(TIMESTAMP) >= start.date & as_date(TIMESTAMP) <= end.date)
+      DF_Input <- DF_Input %>% filter(as_date(TIMESTAMP) >= start.date & as_date(TIMESTAMP) <= end.date)
     }
     
     # If no overlap is returned after the filtering, set DF equal to NA, otherwise an empty DF is saved
@@ -380,23 +459,24 @@ CPtoFFPinput = function(zip.file = NULL,
       cat(warn(paste0("\n [!] No overlap between date window and dataframe timestamp for the ",
                       site.ID, " station. FFP input table is not created.\n")))
       
-      DF_Input = NULL
+      DF_Input <- NULL
     }
+    
     
     
     # -- PID -- #
     
     # Extract PID from TOC file, located everywhere inside the project folder
-    PID = NULL
-    TOC = paste0(dirname(list.files(path = getwd(), pattern = paste0('ICOSETC_', site.ID, '_ARCHIVE'), 
-                                    full.names = T, recursive = T)), '/!TOC.csv')
+    PID <- NULL
+    TOC <- paste0(dirname(list.files(path = getwd(), pattern = paste0('ICOSETC_', site.ID, '_ARCHIVE'), 
+                                     full.names = T, recursive = T)), '/!TOC.csv')
     
     if (length(TOC) == 1)
       
     {
       # Read the TOC file and extract the PID for the specific site
-      PID = read_csv(TOC, name_repair = function(x) x %>% str_replace(pattern = ' ', replacement = '_'), 
-                     col_types = cols()) %>%
+      PID <- read_csv(TOC, name_repair = function(x) x %>% str_replace(pattern = ' ', replacement = '_'), 
+                      col_types = cols()) %>%
         rowwise() %>%
         mutate(SITE_CODE = (str_split(File_name, pattern = '_'))[[1]][2]) %>%
         filter(SITE_CODE %in% site.ID) %>%
@@ -412,22 +492,21 @@ CPtoFFPinput = function(zip.file = NULL,
       cat(warn(paste0('\n [!] PID cannot be retrieved for the ', site.ID, ' station.\n')))
     }
     
-    
     # Return the output list
-    Model_Input = list()
+    Model_Input <- list()
     
-    Model_Input[['site_id']] = site.ID
-    Model_Input[['tower_coordinates']] = Coords.vec
-    Model_Input[['PID']] = PID
-    Model_Input[['FFP_input_parameters']] = DF_Input
+    Model_Input[['site_id']] <- site.ID
+    Model_Input[['tower_coordinates']] <- Coords.vec
+    Model_Input[['PID']] <- PID
+    Model_Input[['FFP_input_parameters']] <- DF_Input %>% select(- any_of(c('site_id', 'lat', 'lon', 'PID')))
     
     # Add the data as data frame
-    Model_DF = data.frame(
+    Model_DF <- data.frame(
       site_id = site.ID,
       lat = Coords.vec[1] %>% as.numeric(),
       lon = Coords.vec[2] %>% as.numeric(),
       PID = PID) %>%
-      bind_cols(DF_Input)
+      bind_cols(DF_Input %>% select(- any_of(c('site_id', 'lat', 'lon', 'PID'))))
     
   } else if (is.null(FFP.input.table) & is.null(zip.file))
     
@@ -444,8 +523,8 @@ CPtoFFPinput = function(zip.file = NULL,
   {
     
     # In the project dir, create a folder with site code and input dir inside #
-    Site_dir = paste0(getwd(), '\\', site.ID)
-    Input_dir = paste0(getwd(), '\\', site.ID, '\\', 'Input')
+    Site_dir <- paste0(getwd(), '\\', site.ID)
+    Input_dir <- paste0(getwd(), '\\', site.ID, '\\', 'Input')
     
     if (!dir.exists(Site_dir)) {dir.create(Site_dir)}
     if (!dir.exists(Input_dir)) {dir.create(Input_dir)}
@@ -454,13 +533,13 @@ CPtoFFPinput = function(zip.file = NULL,
     write_csv(Model_DF, file = paste0(Input_dir, '\\', 
                                       site.ID, '_', min(as_date(Model_DF$TIMESTAMP)) %>% str_replace_all('-', ''), '_',
                                       max(as_date(Model_DF$TIMESTAMP)) %>% str_replace_all('-', ''), '_FFPinput.csv'))
-   
+    
     message(prog.mes('\nFFP input table saved'))
-     
+    
   }
   
   
   # -- RETURN INPUT TABLE -- #
   if (return.input == TRUE) {return(Model_Input)}
   
-} # Function ending...
+} # Function ending
