@@ -214,5 +214,5 @@ doFFP(FFP.input.df = Site_1[['FFP_input_parameters']],
       max.gap = 4, FFP.domain = 1000, dx = 1, FFP.R = c(50,70,80,90), which.FFP.R=70,
       drop.trivial.srcs = TRUE, save.FFP.mtx.as="nc",          
       save.plot.FFP.mtx = FALSE, return.isopleth=TRUE, save.log=TRUE, save.ncplot=TRUE, 
-      do.daily climatology=TRUE, skip=c(F, T, T, F, F, F, T, F, F, F))
+      do.daily.climatology=TRUE, skip=c(F, T, T, F, F, F, T, F, F, F))
 ```
