@@ -50,6 +50,11 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
     FFP.input.df <- read_csv(FFP.input.df, col_types = cols())
     FFP.input.df$'TIMESTAMP' <- with_tz(FFP.input.df$'TIMESTAMP', tz ='GMT') # Set the correct timezone
   }
+
+  # Warn if the DF TZ is not GMT #
+  if(tz(FFP.input.df$TIMESTAMP) != "GMT") {
+    cat(warn(paste0("The time zone of the input dataframe is not GMT, it shoud be corrected")))
+  }
   
   # INPUTS AVAILABILITY CHECK
   if(is.null(FFP.input.df)){
@@ -210,11 +215,11 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
       if(any(skip))
       {
         # Filter the input dataframe according to the skip parameter #
-        if(all(length(skip) != length(unique(as_date(FFP.input.df$TIMESTAMP))), length(skip) != 1)) 
+        if(all(length(skip) != length(unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))), length(skip) != 1)) 
         {stop("Skip vector length is not equal than input DF days length")}
         
         else { # Filter the dataframe according to the skip parameter # Then change the skip parameter #
-        FFP.input.df <- FFP.input.df[as_date(FFP.input.df$TIMESTAMP) %in% (unique(as_date(FFP.input.df$TIMESTAMP))[!skip]), ]
+        FFP.input.df <- FFP.input.df[as_date(FFP.input.df$TIMESTAMP, tz ='GMT') %in% (unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))[!skip]), ]
         
         skip=F
         
@@ -268,7 +273,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
     }
     
     # Create a days factor to split the dataset into daily chunks
-    days.factor <- as.factor(format(FFP.input.df$'TIMESTAMP', '%Y%m%d'))
+    days.factor <- as.factor(format(FFP.input.df$'TIMESTAMP', '%Y%m%d', tz = "GMT"))
     
     # skip length check #
     if(all(length(skip) != length(levels(days.factor)), length(skip) != 1)) 
@@ -282,7 +287,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
       FFP.input.df.cur <- as.data.frame(split(FFP.input.df, days.factor)[[i.day]])
 
       # Set the current day string #
-      current_day_str <- unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d'))
+      current_day_str <- unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT"))
 
       # Calculation start message
       cat(prog.mes(paste0('\n', bold(current_day_str), ': ', 'Start of calculations\n')))
@@ -330,8 +335,8 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
         } else if(do.full.climatology == T) {
           
-          cat(prog.mes(paste0('\n', bold(min(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d'))), bold('-'),
-                              bold(max(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d'))), ': ',
+          cat(prog.mes(paste0('\n', bold(min(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT"))), bold('-'),
+                              bold(max(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT"))), ': ',
                               'Computing the 2D daily footprint climatology')))
           
           Log_list <- c(Log_list, paste0('\n', 'FFP type: full climatology'))
@@ -392,7 +397,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
         names(FFP.ls) <- NULL
         
         # Format time. It needs to be always a valid value (no gaps allowed in the final product)
-        cur.ts <- unique(format(FFP.input.df.cur$'TIMESTAMP', '%Y%m%d%H%M'))
+        cur.ts <- unique(format(FFP.input.df.cur$'TIMESTAMP', '%Y%m%d%H%M', tz = "GMT"))
         
         ## Extract FFP.R list ## 
         FFP.R.list <- lapply(FFP.ls, function(x) x[['r']])
@@ -419,31 +424,31 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
         # Plot warning where the model was not computed 
         invisible(sapply(FFP.err.indx_1, 
                          function(x) cat(warn(paste0('\n [!] according to the model requirements, FFP was not computed for the timestamp ',
-                                                     as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format))))))) 
+                                                     as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format, tz = "GMT"))))))) 
         
         invisible(sapply(FFP.err.indx_2, 
                          function(x) cat(warn(paste0('\n [!] according to the model requirements, ', FFP.R[which.max(FFP.R)], 
                                                      '% isoline was not computed for the timestamp ',
-                                                     as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format))))))) 
+                                                     as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format, tz = "GMT"))))))) 
         
         invisible(sapply(FFP.err.indx_3, 
                          function(x) cat(warn(paste0('\n [!] according to the model requirements, ', 
                                                      paste0(FFP.R[which(is.na(FFP.R.list[[x]]))], '% '), 
                                                      'isoline was not computed for the timestamp ',
-                                                     as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format))))))) 
+                                                     as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format, tz = "GMT"))))))) 
         
         # Add messages to log
         Log_list <- c(Log_list, sapply(FFP.err.indx_1, function(x) paste0('[!] according to the model requirements, FFP was not computed for the timestamp ',
-                                                                          as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format)))))
+                                                                          as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format, tz = "GMT")))))
         
         Log_list <- c(Log_list, sapply(FFP.err.indx_2, function(x) paste0('\n [!] according to the model requirements, ', FFP.R[which.max(FFP.R)], 
                                                                           '% isoline was not computed for the timestamp ',
-                                                                          as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format)))))
+                                                                          as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format, tz = "GMT")))))
         
         Log_list <- c(Log_list, sapply(FFP.err.indx_3, function(x) paste0('\n [!] according to the model requirements, ', 
                                                                           paste0(FFP.R[which(is.na(FFP.R.list[[x]]))], '% '), 
                                                                           'isoline was not computed for the timestamp ',
-                                                                          as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format)))))
+                                                                          as.character(format(FFP.input.df.cur$TIMESTAMP[x], time_format, tz = "GMT")))))
 
         # Check if at least one FFP was computed #
         if(length(FFP.err.indx_1) == length(FFP.ls))  {
@@ -652,11 +657,11 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
 
                 # Add a warning in case of NAs 
                 if(nrow(DF) != nrow(na.omit(DF))) {
-                  cat(warn(paste0('\n [!] ', bold(unique(format(FFP.input.df.cur$TIMESTAMP[i], time_format))), ': ',  
+                  cat(warn(paste0('\n [!] ', bold(unique(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"))), ': ',  
                                   nrow(DF) - nrow(na.omit(DF)), ' NA(s) were found in the ', which.FFP.R, '% isopleth coordinates list. The geometry is still calculated', '\n')))
                   
                   Log_list <- c(Log_list, '', 
-                                paste0('[!] ', bold(unique(format(FFP.input.df.cur$TIMESTAMP[i], time_format))), ': ', 
+                                paste0('[!] ', bold(unique(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"))), ': ', 
                                        nrow(DF) - nrow(na.omit(DF)), ' NA(s) were found in the ', which.FFP.R, '% isopleth coordinates list. The geometry is still calculated'), '')
                 }
                 
@@ -684,7 +689,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
             # Insert time variable and char numbers for the date field in the polygon attribute table
             if(all(do.full.climatology == F, do.daily.climatology==F))  {
 
-              FFP.input.list[['time']] <- as.character(format(unique(FFP.input.df.cur$'TIMESTAMP'), time_format))
+              FFP.input.list[['time']] <- as.character(format(unique(FFP.input.df.cur$'TIMESTAMP'), time_format, tz = "GMT"))
               FFP.input.list[['char_length']] <- nchar(FFP.input.list$time[1])
 
             } else if(do.full.climatology == T) {
@@ -1418,3 +1423,4 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
   } # DF, Coords and site.ID validity ending...
   
 } # FFP function ending
+
