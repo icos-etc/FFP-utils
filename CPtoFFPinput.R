@@ -2,14 +2,16 @@
 ## - MANIPULATE DATA FROM CARBON PORTAL AND BUILD AN OUTPUT READY FOR BEING PROCESSED BY THE FFP FUNCTION - ##
 ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ## -- ##
 
-CPtoFFPinput = function(zip.file = NULL,
-                        FFP.input.table = NULL,
-                        start.date = NULL,
-                        end.date = NULL,
-                        save.input.table = TRUE,
-                        return.input = TRUE)
-  
+CPtoFFPinput = function(zip.file = NULL,             # ZIP file path
+                        FFP.input.table = NULL,      # Existing input table csv 
+                        start.date = NULL,           # Date start in the format YYYY-MM-DD
+                        end.date = NULL,             # Date end in the format YYYY-MM-DD
+                        save.input.table = TRUE,     # Save the output data as csv
+                        return.input = TRUE,         # Return the output data as R list
+                        MDS.clim = FALSE)            # Inlcude MDS-derived indices for gap-filled data # TRUE only in internal ETC pipeline
+
 {
+
   # Stop the function if no input table is provided
   if (is.null(FFP.input.table) & is.null(zip.file))
   {
@@ -298,12 +300,21 @@ CPtoFFPinput = function(zip.file = NULL,
       hm.df <- fill(hm.df, hm, .direction = 'down')
       
       
+      # --- IDX BUILD --- #
+      # Get dataset years
+      Years=Fluxes.df$TIMESTAMP %>% year() %>% unique()
+      DF_Idx=Years %>% map(function(x) 
+                      seq(as.POSIXct(paste0(x, "-01-01 00:00:00"), format = "%Y-%m-%d %H:%M", tz="GMT"), 
+                          as.POSIXct(paste0(x, "-12-31 23:30:00"), format = "%Y-%m-%d %H:%M", tz="GMT"), 
+                          by = "30 mins") %>% tibble(TIMESTAMP=.)) %>% 
+        map(function(x) x %>% mutate(Idx=row_number(TIMESTAMP)-1)) %>% 
+        bind_rows()
+      
       
       # --- FULL JOIN --- #
       DF_Input <- Fluxes.df %>% left_join(hm.df, by = 'TIMESTAMP') %>% 
-        left_join(hc.df, by = 'TIMESTAMP') %>%
+        left_join(hc.df, by = 'TIMESTAMP') %>% 
         na.omit()
-      
       
       
       # -- D, Z0, Zm -- #
@@ -315,11 +326,45 @@ CPtoFFPinput = function(zip.file = NULL,
                'PBL' = 'PBLH')
       
       
-      
       # -- DF REFINING -- #
       
       # Change nodata values (from -9999 to NA)
       DF_Input[DF_Input == -9999] <- NA
+      
+      
+      # -- MDS CHUNK -- #
+      
+      if(MDS.clim)
+        
+      {
+       
+        # Add rownumber (Index) #
+        DF_Input=DF_Input %>% left_join(DF_Idx, by = "TIMESTAMP") 
+         
+        # MDS indice path #
+        Idx_dir <- paste0(getwd(), '/', site.ID, '/', 'Input', "\\", "MDS")
+        
+        # MDS output file reading #
+        Idx=(list.files(path = Idx_dir, full.names = T, pattern = "indices"))
+        
+        # MDS gap-filling indices extraction # 
+        Idx_full=Idx %>% map(function(x) x %>% read_csv(col_types = "iic") %>% 
+                               rowwise() %>% mutate(MDS_Idx=str_split(ZERO_BASED_INDICES, pattern=",")) %>% 
+                               mutate(MDS_Idx=list(as.numeric(MDS_Idx))) %>% 
+                               select(-ZERO_BASED_INDICES, -SAMPLES_COUNT) %>% 
+                               rename("Idx"="ZERO_BASED_INDEX")) 
+        
+        # Incorporate MDS gap-filling indices in the dataframe for each half-hour #
+        DF_Input=DF_Input %>% mutate(Anno=year(TIMESTAMP)) %>% split(.$Anno) %>% 
+          map(function(x) x %>% select(-Anno) %>% 
+                mutate(ZERO_BASED_INDEX=row_number(TIMESTAMP)-1)) %>% 
+          map2(.x=., .y=Idx_full, ~ .x %>% left_join(.y, by="Idx")) %>% 
+          map(function(x) x %>% select(-ZERO_BASED_INDEX)) %>% 
+          bind_rows()
+        
+      }
+      
+      # -- DF FILTERING -- #
       
       # Filter between start and end dates
       if (!is.null(start.date) & is.null(end.date))
@@ -523,14 +568,14 @@ CPtoFFPinput = function(zip.file = NULL,
   {
     
     # In the project dir, create a folder with site code and input dir inside #
-    Site_dir <- paste0(getwd(), '\\', site.ID)
-    Input_dir <- paste0(getwd(), '\\', site.ID, '\\', 'Input')
+    Site_dir <- paste0(getwd(), '/', site.ID)
+    Input_dir <- paste0(getwd(), '/', site.ID, '/', 'Input')
     
     if (!dir.exists(Site_dir)) {dir.create(Site_dir)}
     if (!dir.exists(Input_dir)) {dir.create(Input_dir)}
     
     # Write the CSV file
-    write_csv(Model_DF, file = paste0(Input_dir, '\\', 
+    write_csv(Model_DF, file = paste0(Input_dir, '/', 
                                       site.ID, '_', min(as_date(Model_DF$TIMESTAMP)) %>% str_replace_all('-', ''), '_',
                                       max(as_date(Model_DF$TIMESTAMP)) %>% str_replace_all('-', ''), '_FFPinput.csv'))
     
