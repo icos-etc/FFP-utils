@@ -1,5 +1,5 @@
 # FFP-utils
-Functions to manipulate data from the ICOS Carbon Portal, perform a Flux Footprint Prediction (FFP) using the method developed by Kljun et al. (2015), and save the outputs in different formats. 
+Functions to manipulate data from the ICOS Carbon Portal, perform a Flux Footprint Prediction (FFP) using the method developed by Kljun et al. (2015), and save the outputs in different formats at different temporal resoolutions.
 
 ## CPtoFFPinput
 Starting from an input zip file downloaded from the ICOS Carbon Portal, the function returns a dataframe ready to apply the Flux Footprint Prediction (FFP) method developed by Kljun et al. (2015).
@@ -12,17 +12,19 @@ Starting from an input zip file downloaded from the ICOS Carbon Portal, the func
 | end.date	        | End date of measurement needed, in the format YYYY-MM-DD                                |
 | save.input.table	| If TRUE, the input table for the FFP model is saved as CSV                              |
 | return.input	    | If TRUE, the function output is returned                                                |
+| MDS.clim    | TRUE only in internal ETC pipeline. It reads MDS output for calculating gap-filled FFP  |
 
 This function performs data processing and temporal filtering of an ICOS L2 ARCHIVE or L2 INTERIM zip file. Additionally, it can do a simplified processing and a temporal filtering of an existing FFP input table (e.g. a CSV file previously returned by the same function). 
 
 There is no need to unzip the compressed file of each site. When multiple ZIP files are downloaded from the Carbon Portal, the only action needed is to unzip the parent ZIP file. 
-If the dates are set as NULL, data is not filtered according to a specific time interval. Alongside the FFP input data, the EC tower coordinates are extracted from the metadata contained in the ZIP file, or silently within the function if an existing CSV file is used. When multiple zip files are downloaded, the parent zip folder contains a CSV file named ‘!TOC.csv’ that is used to extract the PID of each level 2 product. 
+If the dates are set as NULL, data is not filtered for a specific time interval. Alongside the FFP input data, the EC tower coordinates are extracted from the metadata contained in the ZIP file, or silently within the function if an existing CSV file is used. When multiple zip files are downloaded, the parent zip folder contains a CSV file named ‘!TOC.csv’, used to extract the PID of each level 2 product. 
 
-If ‘return.input’ is set to TRUE, the 4-elements matrix is the only output directly returned by the function within R.
-In the R working directory the function creates a folder named as the site ID and a sub-folder named "Input", where are stored the processed FFP inputs in a CSV format. The filename follows the structure: site id_start date_end date_FFP input.csv. 
-
-When specified, a 4-element list is returned, containing: site ID string; vector with EC tower lat/lon coordinates; PID; FFP input data frame. Depending on data and site characteristics, not all the elements can always be returned (e.g. PID, if not available when the ‘!TOC.csv’ file doesn't exist; FFP input table when not all the parameters are available).
+When return.input is set to TRUE, a 4-elements list is returned as output by the function in R. It contains: site ID string; vector with EC tower lat/lon coordinates; PID; FFP input data frame. Depending on data and site characteristics, not all the elements can always be returned (e.g. PID, if not available when the ‘!TOC.csv’ file doesn't exist; FFP input table when not all the parameters are available).
 When the FFP input table is saved as CSV, ‘site_id’, ‘lat, ‘lon’ and ‘PID’ are added in the first 4 columns of the table. The "TIMESTAMP" returned by the function corresponds to the "TIMESTAMP_START".  
+
+If save.input.table is set to TRUE, in the R working directory the function creates a folder named as the site ID and a sub-folder named "Input", where the processed the FFP inputs are stored in a CSV format. The filename follows the structure: site id_start date_end date_FFP input.csv. 
+
+The MDS.clim parameter is only needed in ICOS ETC internal pipeline. It works togheter with MDS method (Marginal Distribution Sampling) to correctly locate in time the observations used for performing the gap-filling. It adds two additional columns to the FFP data frame containing the indices of the half-hours used by MDS in the gap-filling process. 
  
 ## doFFP
 Starting from the input parameters (e.g. a CSV file or an R object returned by the CPtoFFPinput function), it saves in dedicated folders the daily Flux Footprints Predictions (FFP; Kljun et al., 2015) for a specific Eddy Covariance site. The FFP R function can be downloaded here: https://footprint.kljun.net/download_2.php
@@ -50,19 +52,20 @@ Starting from the input parameters (e.g. a CSV file or an R object returned by t
 | do.full.climatology | If TRUE, a single FFP climatology is calculated for the entire dataset provided   | 
 | do.daily.climatology | If TRUE, do daily FFP climatology                                                |
 | skip               | A vector for possibly Skip single days from computation                            |    
+| MDS.input | Performs MDS-style gap-filling for FFP. TRUE only in the ICOS ETC internal pipeline          |
 
-For every time interval (e.g. 30 minutes) within each day, the function processes a structured input table and runs the FFP function developed by Kljun et al. (2015), saving the output matrices in csv or netCDF (default) format. Optionally, plots of the footprint matrix and a log file of the entire process are returned. 
+For every time interval (e.g. 30 minutes) in a single day, the function processes a structured input table and runs the FFP function developed by Kljun et al. (2015), saving the output array in csv, netCDF (default) or GeoTiff format. Optionally, plots of the footprint matrix and a log file are returned. 
 
-Tower coordinates, site ID and PID can be omitted if the dataframe already contains them (e.g. the CSV file saved by the CPtoFFPinput function), otherwise they must be specified (e.g. list returned by the CPtoFFPinput function). The function relies on the FFP model function (Kljun et al., 2015) which should be placed in the R working directory, preferably inside the subfolder ‘local_functions’ (default). Alternatively, is also possible to specify a different FFP function path. Since the FFP model run is time-consuming, is possible to parallelize the function (do.parallel=TRUE), using the furrr package. To prevent system crashing, the number of workers (default: 3) should be low (in relation to the processing power of the machine). 
+If not already included in the dataframe (e.g. the CSV file saved by the CPtoFFPinput function), Tower coordinates, site ID and PID arguments must be specified (e.g. R list returned by the CPtoFFPinput function). The function relies on the FFP model function (Kljun et al., 2015) which should be placed in the R working directory, preferably inside the subfolder ‘local_functions’ (default). Alternatively, is also possible to specify a different FFP function path. Since the FFP model run is time-consuming, function parallelization can be set (do.parallel=TRUE) using the furrr package. To prevent system crashing, the number of workers (default: 3) should be low (in relation to the processing power of the machine). 
 
 Gaps are filled up to a defined threshold (4 by default; max.gap argument). FFP function-related parameters, such as the spatial extent (1000 m by default; FFP.domain argument), resolution (1 m by default; dx argument), the FFP density thresholds for isopleths calculation (c(50, 70, 80, 90) by default; FFP.R argument) and which isopleth save in the netCDF file (which.FFP.R) can be specified. In addition, pixels with a minimal contribution to the total density (threshold of 90%; drop.trivial.srcs argument) are removed by default. 
 
 By default, a daily 48-layers netCDF is produced. Alternatively, is possible to calculate a FFP climatology in two ways: 
 *    <ins>daily climatology</ins> (do.daily.climatology=TRUE) calculates a daily FFP climatology. As result, every daily netCDF will have only one layer (the daily climatology one) 
 *    <ins>full climatology</ins> (do.full.climatology=TRUE) calculates a unique FFP climatology for the entire dataset provided, regardless its length. The date used as reference is the first day in the provided dataset
+When MDS.input is set to TRUE (only in the ICOS ETC interal pipeline), the FFP climatology is automatically calculated for those observations where fluxes were gap-filled (performed using MDS). The climatology functions takes as inputs the same half-hours used by MDS for the gap-filling.  
 
-An additional argument (skip: default FALSE) can be used to arbitrarly exclude single days from the FFP computation
-If needed, a boolean vector (TRUE: skip, FALSE: don't skip) with length equal to the number of days of the dataset has to be specified. If skip lenght is equal to one, the skip value is applied to the entire dataset. 
+Single days can be can be arbitrarly excluded from the FFP computation (skip: default FALSE). When needed, a boolean vector (TRUE: skip, FALSE: don't skip) with length equal to the number of days of the dataset has to be specified. If skip lenght is equal to one, the skip value is applied to the entire dataset. 
 
 ### Outputs
 
@@ -75,20 +78,21 @@ The dimensions are related to the spatial (x, y) and temporal resolution (time),
 
 | Variable (Dimensions) | Description|
 | - | - |
-| x (x), y (y), time (time) | Variables strongly linked to the corresponding dimensions. They place each FFP matrix in the right position in terms of space and time |
-| FFP (x, y, time) | Daily array containing the 2D FFP matrices calculated every 30 minutes. Each matrix was compressed and converted to integer values, but providing scale and offset factors to allow software to retrieve original values. When the FFP model fails, a no-data grid (-9999 values) is added to keep the total number of time steps equal (48) for every file generated. When FFP is climatology (daily or full), netCDF array always consists of one layer. |
+| x (x), y (y), time (time) | Variables strongly linked to the corresponding dimensions. They place each FFP matrix in the right position and time |
+| FFP (x, y, time) | Daily array containing the 2D FFP matrices calculated every 30 minutes. Each matrix was compressed and converted to integer values, but providing scale and offset factors to allow software to retrieve original values. When the FFP model fails, a no-data grid (-9999 values) is added to keep the total number of time steps equal (48) for every file generated. When FFP is climatology (daily or full), netCDF array always consists of one layer |
 | polygon_id (instance), observation_time (n_char, instance), polygon_area (instance) | Variables strictly related to the 70% isopleth (one for each time interval), containing the ID (polygon_id), the corresponding timestamp (observation_time) and the area in m<sup>2</sup> (polygon_area) |
 | quality_flag (instance) | Quality flag of FFP. 0: FFP and isopleths correctly calculated; 1: FFP and isopleths not calculated; 2: FFP correctly calculated, but not cropped because the 90% isopleth could not be retrieved; 3: FFP correctly calculated, but not cropped because multiple isopleths could not be retrieved |
 | geometry_container, UTM_Coordinate_System | They define the associations between the variables linked to the geometry (the isopleth chosen to be saved) and the correct Coordinate Reference System (CRS, in WGS84/UTM) for each variable that must be spatially located. The right CRS is automatically detected starting from the WGS84 coordinates of the EC tower |
 | nodes_count (instance), nodes_x (nodes), nodes_y (nodes) | Respectively, count of the total number of vertices for the isopleth, X and Y coordinates of the isopleth vertices |
 | EC_tower_coordinates (EC_Coords) | Coordinates in WGS84/UTM of the eddy covariance flux tower |
 
-The attributes provide metadata for a better description of the file, according to a set of standards (CF - Climate and Forecast; ATMODAT).
+The attributes provide metadata for a better description of the file, according to the ATMODAT (Atmospheric Model Data) standards. The netCDF file is structured following the CF (Climate and Forecast) 1.8 standard. 
 
 </ul>
 
-*	<ins>Individual_footprint_matrices</ins>: if ‘csv’ is chosen as saving option, it contains the 30-min output FFP matrices saved in CSV format. Each file is named following the structure: site ID_FFP2Dmtx_YYYYMMDDHHmm.csv.
-*	<ins>Individual_footprint_plots</ins>: if ‘save.plot.FFP.mtx’ is true, it contains the plots of the 30-min output FFP matrices saved in PNG format. Each file is named following the structure: site ID_FFP2Dmtx_YYYYMMDDHHmm.png.
+*	<ins>GTiff_files</ins>: if ‘gtiff’ is chosen as saving option, it contains the output daily FFP matrices saved in a multi-band GeoTiff file. The file contains only the FFP matrices (single matrix in case of climatology options), each one stored as single layer. Each matrix was compressed and converted to integer values, but scale and offset factors are internally provided to allow software to retrieve original values. The file is named following the structure: site ID_FFP2D_YYYYMMDD.tiff. Additionally, a set of metadata related to file creators, methods used, data standards and file version are provided within the GeoTiff file. Also, the metadata includes the QC (Quality Control) values. 
+*	<ins>Individual_footprint_matrices</ins>: if ‘csv’ is chosen as saving option, it contains the output FFP matrices saved in CSV format. Each file is named following the structure: site ID_FFP2Dmtx_YYYYMMDDHHmm.csv.
+*	<ins>Individual_footprint_plots</ins>: if ‘save.plot.FFP.mtx’ is true, it contains the plots of the output FFP matrices saved in PNG format. Each file is named following the structure: site ID_FFP2Dmtx_YYYYMMDDHHmm.png.
 *	<ins>log</ins>: if ‘save.log’ is true, it contains a log file for each function run. The file is named following the structure: site ID_log_start date_end date.log
 
 ## References
@@ -205,6 +209,7 @@ input.list=lapply(zip.list, function(x) CPtoFFPinput(zip.file=x, save.input.tabl
 Site_1= input.list[[1]]
 
 # Calculate in parallel FFP daily climatology excluding the days 2, 3, 7 # Set 4 workers #
+# Save the output as GeoTiff #
 doFFP(FFP.input.df = Site_1[['FFP_input_parameters']],
       EC.tower.coords = Site_1[['tower_coordinates']],
       site.ID=Site_1[['site_id']],
@@ -212,7 +217,7 @@ doFFP(FFP.input.df = Site_1[['FFP_input_parameters']],
       FFP.function.path="local_functions\\calc_footprint_FFP_climatology.R",
       do.parallel=TRUE, n.workers=4,
       max.gap = 4, FFP.domain = 1000, dx = 1, FFP.R = c(50,70,80,90), which.FFP.R=70,
-      drop.trivial.srcs = TRUE, save.FFP.mtx.as="nc",          
+      drop.trivial.srcs = TRUE, save.FFP.mtx.as="gtiff",          
       save.plot.FFP.mtx = FALSE, return.isopleth=TRUE, save.log=TRUE, save.ncplot=TRUE, 
       do.daily.climatology=TRUE, skip=c(F, T, T, F, F, F, T, F, F, F))
 ```
