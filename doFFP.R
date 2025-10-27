@@ -6,7 +6,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                EC.tower.coords=NULL,      # Ec tower coordinates (Lat, Lon)
                site.ID=NULL,              # site.ID
                PID=NULL,                  # site PID
-               FFP.function.path="local_functions\\calc_footprint_FFP_climatology.R", # If specified, full path of FFP function, otherwise local path
+               FFP.function.path="local_functions/calc_footprint_FFP_climatology.R", # If specified, full path of FFP function, otherwise local path
                do.parallel=FALSE,         # parallelize the calculation of footprint
                n.workers=3,               # number of workers for future_map
                max.gap = 4,               # maximum number of consecutive half-hours to fill with LOCF
@@ -15,17 +15,17 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                FFP.R = c(50,70,80,90),    # Isopleths
                which.FFP.R = 70,          # Which isopleth save
                drop.trivial.srcs = TRUE,  # whether to remove point sources with a trivial contribution
-               save.FFP.mtx.as='nc',      # csv, nc (NetCDF), NULL (no save)
+               save.FFP.mtx.as='nc',      # csv, nc (NetCDF), gtiff(GeoTiff), NULL (no save)
                save.plot.FFP.mtx = FALSE, # Whether to save a plot of the FFP2D (matrix and isoplethes, not the spatial polygons)
                return.isopleth=TRUE,      # Return chosen isopleth in the netCDF file  
                save.log=TRUE,             # Save messages files to log
                save.ncplot=TRUE,          # Save a sample plot of nc the file
                do.full.climatology=FALSE, # Do full FFP climatology 
                do.daily.climatology=FALSE,# Do daily FFP climatology
-               skip=FALSE)                # Skip single days from computation     
+               skip=FALSE,                # Skip single days from computation
+               MDS.input=FALSE)           # Performs MDS-style gapfilling # TRUE only in ETC internal pipeline                 
 {
 
-  
   # Install pacman
   if (!require("pacman", quietly = T)) {install.packages("pacman")} 
   # Install EBImage
@@ -133,8 +133,8 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
     EC.tower.utm <- as.vector(st_coordinates(st_transform(EC.tower, EPSG.code)))
     
     # Create main output directory (and eventually site directory)
-    Site_dir <- paste0(getwd(), '\\', site.ID)
-    FFP.output.dir <- paste0(getwd(), '\\', site.ID, '\\', 'Output')
+    Site_dir <- paste0(getwd(), '/', site.ID)
+    FFP.output.dir <- paste0(getwd(), '/', site.ID, '/', 'Output')
     
     if(!dir.exists(Site_dir)) {dir.create(Site_dir)}
     if(!dir.exists(FFP.output.dir)) {dir.create(FFP.output.dir)}
@@ -206,6 +206,10 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
     stopifnot('Choose one between do.climatology and do.daily.climatology' = 
                 !(do.full.climatology == T & do.daily.climatology == T))
 
+    # Climatology and MDS error #
+    stopifnot('Choose one between climatology options and MDS' = 
+                !(all(any(do.full.climatology, do.daily.climatology), MDS.input)))
+    
     # Set the correct time format # 
     time_format='%Y-%m-%d %H:%M'
 
@@ -280,20 +284,23 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
     {error("Skip vector length is not equal than input DF days length")}
     
     
-    for (i.day in levels(days.factor)[!skip]) { 
+    ## -- DAYS LOOP START -- ##
+    
+    for (i.day in levels(days.factor)[!skip]) {
       
       # Split the input into days chunks and grab the current one
       FFP.input.df.cur <- data.frame() 
-      FFP.input.df.cur <- as.data.frame(split(FFP.input.df, days.factor)[[i.day]])
-
+      FFP.input.df.cur <- tibble(split(FFP.input.df, days.factor)[[i.day]])
+      
       # Set the current day string #
       current_day_str <- unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT"))
-
+      
       # Calculation start message
       cat(prog.mes(paste0('\n', bold(current_day_str), ': ', 'Start of calculations\n')))
       
       # Quantify survived NAs from input data (don't drop them!)
-      rows.na <- nrow(FFP.input.df.cur) - nrow(na.omit(FFP.input.df.cur))
+      rows.na <- nrow(FFP.input.df.cur[, !(names(FFP.input.df.cur) %in% c("MDS_Idx"))]) - 
+        nrow(na.omit(FFP.input.df.cur[, !(names(FFP.input.df.cur) %in% c("MDS_Idx"))]))
       cat(warn(paste0('\n[NOTE] ', bold(current_day_str), ': ', 
                       bold(as.character(rows.na)), ' rows ','(',as.character(round(rows.na/nrow(FFP.input.df.cur)*100)),'% of data) are data gaps that cannot be filled.\n')))
       
@@ -306,7 +313,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                      '% of data) are data gaps that cannot be filled.'), '')
       
       # Check (here) if there are all NA values and remove them   
-      if(all(complete.cases(FFP.input.df.cur[4:ncol(FFP.input.df.cur)])==F)) {
+      if(all(complete.cases(FFP.input.df.cur[4:(ncol(FFP.input.df.cur)-1)])==F)) {
         
         cat(warn(paste0('\n [!] ', bold(current_day_str), ': ',  
                         'no input data is available - model is not computed - no file is produced', '\n')))
@@ -335,13 +342,33 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
         } else if(do.full.climatology == T) {
           
-          cat(prog.mes(paste0('\n', bold(min(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT"))), bold('-'),
-                              bold(max(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT"))), ': ',
+          cat(prog.mes(paste0('\n', bold(min(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz ='GMT'))), bold('-'),
+                              bold(max(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz ='GMT'))), ': ',
                               'Computing the 2D daily footprint climatology')))
           
           Log_list <- c(Log_list, paste0('\n', 'FFP type: full climatology'))
           
         }
+        
+        
+        # MDS conditional #
+        if(MDS.input)
+        {
+          # Filter the current year in the main DF #
+          FFP.input.df.yr <- FFP.input.df[year(FFP.input.df$TIMESTAMP) %in% year(FFP.input.df.cur$TIMESTAMP[1]), ]
+          
+          ## hybrid list, nested map - NO pipe ## 
+          FFP.input.list.cur=map2(.x = split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), 
+                                  .y = map(FFP.input.df.cur$MDS_Idx, function(x) 
+                                    FFP.input.df.yr[FFP.input.df.yr$Idx %in% x, ]), 
+                                  ~ if(nrow(.y) != 0)  {.y} else {.x})
+          
+        } else  {
+          
+          FFP.input.list.cur <- split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP)
+          
+        }
+        
         
         # FFP main function
         if(do.parallel) {
@@ -350,7 +377,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           pacman::p_load(furrr)
           plan(multisession, workers=n.workers) # By default: low number of workers to avoid PC crashing
           
-          FFP.ls <- future_map(.x = split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), # Split the input to create a list
+          FFP.ls <- future_map(.x = FFP.input.list.cur, 
                                .f = function(x) 
                                  tryCatch(expr = calc_footprint_FFP_climatology(
                                    zm = x$zm,                  
@@ -373,7 +400,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
         } else {
           # Function not parallelized
-          FFP.ls <- lapply(split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), # Split the input to create a list
+          FFP.ls <- lapply(FFP.input.list.cur, 
                            FUN = function(x) 
                              tryCatch(expr = calc_footprint_FFP_climatology( 
                                zm = x$zm,                  
@@ -492,11 +519,11 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                                'FFP matrix plots saved'), '')
               }
               
+              # Plots folder #
+              FFP.mtx.img.dir <- paste0(FFP.output.dir, '/individual_footprints_plots/')
+              
               # Create folder if not exists
-              if(!dir.exists(paste0(FFP.output.dir, '/individual_footprints_plots/')))  {
-                
-                FFP.mtx.img.dir <- paste0(FFP.output.dir, '/individual_footprints_plots/'); dir.create(FFP.mtx.img.dir)
-              }
+              if(!dir.exists(FFP.mtx.img.dir))  {dir.create(FFP.mtx.img.dir)}
               
               # Create a dataframe for the plot 
               DF_grid <- data.frame(X=as.vector(t(FFP.ls[[i]]$'x_2d')) + EC.tower.utm[1], 
@@ -516,7 +543,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                 
                 timestamp_label <- paste0('Timestamp: ', FFP.input.df.cur[i, 'TIMESTAMP'], ' GMT')
                 ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, '_', 'FFP2Dplot', 
-                                       format(FFP.input.df.cur$'TIMESTAMP'[i], '%Y%m%d%H%M'), 'jpeg')
+                                       format(FFP.input.df.cur$'TIMESTAMP'[i], '%Y%m%d%H%M'), '.jpeg')
                 
               } else if(do.full.climatology == T) {
                 
@@ -526,9 +553,9 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                 
               } else if(do.daily.climatology == T) {
                 
-                timestamp_label <- paste0('Timestamp: ', current_day)
+                timestamp_label <- paste0('Timestamp: ', current_day_str)
                 ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, "_FFP2Dplot_", "_FFP2D_daily_climatology_", 
-                                       current_day, ".jpeg")
+                                       current_day_str, ".jpeg")
                 
               }
               
@@ -595,7 +622,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
         } # Condition if at least one FFP is computed and remaining savings ending...
           
         
-        ## -3- ## Save NC file ---------------
+        ## -3- ## Save raster file ---------------
         
         if(is.null(save.FFP.mtx.as)) {
           
@@ -603,6 +630,143 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
           # Save output to log
           Log_list <- c(Log_list, paste0('No FFP output matrices are saved'))
+          
+          
+        } else if (save.FFP.mtx.as == 'gtiff') {
+          
+          # Compute the FFP full Extent # 
+          FFP.Xdim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx)
+          FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx) 
+          
+          # Adding a dummy NA grid for NULL elements #
+          for(i in FFP.err.indx_1) {
+            FFP.ls[[i]]$fclim_2d <- array(data = NA, dim = c(length(FFP.Xdim), length(FFP.Ydim)))
+          }
+          
+          FFP.lon <- FFP.Xdim + EC.tower.utm[1]
+          FFP.lat <- FFP.Ydim + EC.tower.utm[2]
+          
+          # Extract the temporal domain
+          Time <- as.character(format(unique(FFP.input.df.cur$'TIMESTAMP'), time_format))
+          
+          # Build the raster grid # 
+          if (any(QC==0)){
+          
+          # Build the lat/lon grid
+          FFP.grid <- data.frame(X=as.vector(t(FFP.ls[[1]]$'x_2d')) + EC.tower.utm[1], 
+                                 Y=as.vector(t(FFP.ls[[1]]$'y_2d')) + EC.tower.utm[2])
+          
+          } else { # If no matrix exist use the extent and resolution parameters
+            
+            FFP.grid <- data.frame(X = rep(FFP.lon, ((FFP.domain*2)/dx)+1),
+                                   Y = as.vector(sapply(FFP.lat, rep, ((FFP.domain*2)/dx)+1)))
+          } 
+          
+          # Data handling and refining 
+          FFP.mtx <- as.data.frame(sapply(FFP.ls, function(x) x[['fclim_2d']]))
+          
+          colnames(FFP.mtx) <- sapply(1:length(FFP.ls), function(x) paste0('FFP_', x))
+          
+          # Calculate scale and offset factors only if at least one not-NA matrix is returned
+          if(any(QC != 1)) {
+            
+            # Add a scaling factor for the FFP values (to reduce object size)
+            range.FFP <- range(FFP.mtx, na.rm=T)
+            
+            # Compute scale and offset factor 
+            # [http://james.hiebert.name/blog/work/2015/04/18/NetCDF-Scale-Factors.html]
+            nbits <- 16
+            
+            # stretch/compress data to the available packed range
+            scale.factor <- (range.FFP[2] - range.FFP[1]) / (2 ** nbits - 1)
+            
+            # translate the range to be symmetric about zero
+            add.offset <- range.FFP[1] + 2 ** (nbits - 1) * scale.factor
+            
+            scale.offset <- c(sf=scale.factor, ofst=add.offset)
+            # FFP.array <- FFP.array * 10^-7
+            
+            # Apply scale and offset to every matrix (DF column) # 
+            FFP.mtx.scaled <- as.data.frame(sapply(FFP.mtx, 
+                                                   function(x) as.integer(round((x - scale.offset['ofst'])/ scale.offset['sf']))))
+            
+            # Bind scaled matrix and coordinates - build the spatraster
+            r <- rast(cbind(FFP.grid, FFP.mtx.scaled), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))
+            
+            # Add scale and factor # Due to rounding, values can't be exactly the same 
+            scoff(r) <- cbind(scale.offset['sf'], scale.offset['ofst'])
+            
+          } else {
+            
+            # Bind matrix and coordinates - build the spatraster
+            r <- rast(cbind(FFP.grid, FFP.mtx), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))
+            
+          }
+          
+          
+          ## Add raster metadata, in any case ##
+          #metags(r) <- c(Identifier=paste0("FFP at ", site.ID, " - ", as_date(FFP.input.df.cur$TIMESTAMP)[1]))
+          metags(r) <- c(TITLE=paste0("Footprint estimation at the ", site.ID, " station"))
+          metags(r) <- c(CONTACT=paste0("Giacomo Nicolini and Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
+                                        "Euro-Mediterranean Center for Climate Change. ", 
+                                        "Email: giacomo.nicolini@cmcc.it; luca.difiore@cmcc.it"))
+          metags(r) <- c(CONVENTIONS="CF-1.8")
+          metags(r) <- c(CREATION_DATE=date())
+          metags(r) <- c(CREATOR=paste0("Giacomo Nicolini, ICOS Ecosystem Thematic Center, ", 
+                                        "Euro-Mediterranean Center for Climate Change, Viterbo, Italy; ",
+                                        "Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
+                                        "Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
+          metags(r) <- c(INSTITUTION=paste0("ICOS Ecosystem Thematic Center, 
+                                            Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
+          metags(r) <- c(KEYWORDS=paste0("Flux footprints"))
+          metags(r) <- c(LICENSE=paste0("CC-BY 4.0"))
+          metags(r) <- c(PRODUCT_VERSION=paste0("1.0"))
+          metags(r) <- c(PROJECT=paste0("Integrated Carbon Observation System"))
+          metags(r) <- c(REFERENCES=paste0("Kljun et al. (2015), doi:10.5194/gmd‐8‐3695‐2015"))
+          metags(r) <- c(HISTORY=paste0("G. Nicolini and L. Di Fiore", date(), sep=", "))
+          metags(r) <- c(SUBJECTS=paste0("Flux footprints"))
+          metags(r) <- c(VARIABLES=paste0("FFP"))
+          
+          # Add FFP QC in raster metadata # 
+          metags(r) <- c(QC=QC)
+          
+          # Write the raster in a GTiff format # 
+          cat(prog.mes('\nSaving the FFP array as multiband GeoTiff...'))
+          
+          # Create the path if don't exist # 
+          ffp.GTiff.fpath <- paste0(FFP.output.dir, "/GTiff_files/")
+          if(!dir.exists(ffp.GTiff.fpath)) {dir.create(ffp.GTiff.fpath)}
+          
+          # GTiff filename and time 
+          if(all(do.full.climatology == F, do.daily.climatology==F))  {
+            
+            ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_", i.day, ".tiff")
+            time(r) <- unique(FFP.input.df.cur$'TIMESTAMP')
+            
+          } else if(do.full.climatology == T) {
+            
+            ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_", "_FFP2D_full_climatology_", 
+                                    first_day, '_', last_day, ".tiff")
+            time(r) <- first_day
+            
+          } else if(do.daily.climatology == T) {
+            
+            ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_", "_FFP2D_daily_climatology_", i.day, ".tiff")
+            time(r) <- as.Date(current_day_str)
+            
+          }
+          
+          # Write the GTiff file #
+          writeRaster(r, filename = ffp.gtiffname, overwrite=T)
+          
+          # Save output message to log
+          Log_list <- c(Log_list, '', paste0(unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d')), ': ', 
+                                             'FFP array saved as multiband GeoTiff'))
+          
+          cat(prog.mes(' done.\n'))
+          
+          cat('\n**************************************************************************************')
+          
           
         } else if (save.FFP.mtx.as == 'nc') {
           
@@ -699,7 +863,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
               
             } else if(do.daily.climatology == T) {
               
-              FFP.input.list[['time']] <- as.character(current_day)
+              FFP.input.list[['time']] <- as.character(current_day_str)
               FFP.input.list[['char_length']] <- nchar(FFP.input.list$time[1])
               
             }
@@ -1423,4 +1587,3 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
   } # DF, Coords and site.ID validity ending...
   
 } # FFP function ending
-
