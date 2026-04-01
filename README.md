@@ -12,7 +12,8 @@ Starting from an input zip file downloaded from the ICOS Carbon Portal, the func
 | end.date	        | End date of measurement needed, in the format YYYY-MM-DD                                |
 | save.input.table	| If TRUE, the input table for the FFP model is saved as CSV                              |
 | return.input	    | If TRUE, the function output is returned                                                |
-| MDS.clim    | TRUE only in internal ETC pipeline. It reads MDS output for calculating gap-filled FFP  |
+| MDS.clim         | TRUE only in internal ETC pipeline. It reads MDS output for calculating gap-filled FFP  |
+| ERA5.file.list   | Full path of yearly ERA5 reanalysis data, used internally to retrieve PBLH              |
 
 This function performs data processing and temporal filtering of an ICOS L2 ARCHIVE or L2 INTERIM zip file. Additionally, it can do a simplified processing and a temporal filtering of an existing FFP input table (e.g. a CSV file previously returned by the same function). 
 
@@ -24,7 +25,9 @@ When the FFP input table is saved as CSV, ‘site_id’, ‘lat, ‘lon’ and �
 
 If save.input.table is set to TRUE, in the R working directory the function creates a folder named as the site ID and a sub-folder named "Input", where the processed the FFP inputs are stored in a CSV format. The filename follows the structure: site id_start date_end date_FFP input.csv. 
 
-The MDS.clim parameter is only needed in ICOS ETC internal pipeline. It works togheter with MDS method (Marginal Distribution Sampling) to correctly locate in time the observations used for performing the gap-filling. It adds two additional columns to the FFP data frame containing the indices of the half-hours used by MDS in the gap-filling process. 
+The MDS.clim parameter is needed in ICOS ETC internal pipeline. It works togheter with MDS method (Marginal Distribution Sampling) to correctly locate in time the observations used for performing the gap-filling. It adds two additional columns to the FFP data frame containing the indices of the half-hours used by MDS in the gap-filling process. 
+
+Planetary boundary layer height can be estiamted from data modelled internally (ERA5.file.list parameter set to NULL), or using value extracted at the site location from the ERA5 hourly reanalysis product. In the latter case, the ERA5.file.list parameter (optimized for internal use) is a list of full paths of yearly csv files containing the data extracted from the ERA5 product. The csv structure should consist of 2 columns, named 'time' (timestamp in posix format) and 'value' (PBLH value). Half-hourly ERA5-derived observation are obtained by linealy interpolating the hourly observations. 
  
 ## doFFP
 Starting from the input parameters (e.g. a CSV file or an R object returned by the CPtoFFPinput function), it saves in dedicated folders the daily Flux Footprints Predictions (FFP; Kljun et al., 2015) for a specific Eddy Covariance site. The FFP R function can be downloaded here: https://footprint.kljun.net/download_2.php
