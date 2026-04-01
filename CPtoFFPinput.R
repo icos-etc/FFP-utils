@@ -8,8 +8,8 @@ CPtoFFPinput = function(zip.file = NULL,             # ZIP file path
                         end.date = NULL,             # Date end in the format YYYY-MM-DD
                         save.input.table = TRUE,     # Save the output data as csv
                         return.input = TRUE,         # Return the output data as R list
-                        MDS.clim = FALSE)            # Inlcude MDS-derived indices for gap-filled data # TRUE only in internal ETC pipeline
-
+                        MDS.clim = FALSE,            # Inlcude MDS-derived indices for gap-filled data # TRUE only in internal ETC pipeline
+                        ERA5.file.list = NULL)       # Optional, full path of yearly ERA5 reanalysis data, used internally to retrieve PBLH
 {
 
   # Stop the function if no input table is provided
@@ -23,7 +23,7 @@ CPtoFFPinput = function(zip.file = NULL,             # ZIP file path
   
   # Install pacman and required packages if they are not already installed
   if (!require("pacman", quietly = T)){install.packages("pacman")}
-  pacman::p_load(crayon, dplyr, tidyr, purrr, lubridate, stringr, sf, tibble, readr)
+  pacman::p_load(crayon, dplyr, tidyr, purrr, lubridate, stringr, sf, tibble, readr, zoo)
   
   # Error messages
   error <- crayon::red
@@ -87,8 +87,6 @@ CPtoFFPinput = function(zip.file = NULL,             # ZIP file path
       cat(warn(paste0('\n [!] PID cannot be retrieved for the ', site.ID, ' station.\n')))
     }
     
-    
-    
     # -- DATA AVAILABILITY CHECK -- # -- FLUXES VARIABLES -- #
     
     # Create an empty dataframe (to prevent failures of the main dataframe processing part) 
@@ -100,6 +98,113 @@ CPtoFFPinput = function(zip.file = NULL,             # ZIP file path
     
     Fluxvar <- c('WS', 'MO_LENGTH', 'V_SIGMA', 'USTAR', 'WD', 'PBLH')
     
+    
+    ## -- ## ERA5 CHUNK ## -- ## 
+    if(!(is.null(ERA5.file.list))) { # File list #
+
+      # Select only the years of interest # 
+      Data_years <- str_sub(string=Fluxes$TIMESTAMP_START, start=1, end=4) %>% unique() %>% as.numeric()
+  
+      # Filter the ERA list according to the data years # 
+      ERA5list_filtered <- ERA5.file.list[ERA5.file.list %>% str_detect(paste(Data_years, collapse = "|"))]
+      
+      # Data reading # Select only time and value # 
+      PBLH_ERA5 <- read_csv(ERA5list_filtered, col_types = cols()) %>% 
+        select(any_of(c("time", "value")))
+  
+      # Check if the columns are present # 
+      if(all(colnames(PBLH_ERA5) %in% c("time", "value"))) { 
+        
+        # Check the correct format #
+        if(all(is.POSIXct(PBLH_ERA5$time), is.numeric(PBLH_ERA5$value)))  {
+          
+          # - 1 - # TABLE CREATION #
+          
+          # Create a dummy DF to fill the half hours # add the last obs # The last one is repeated # Not optimal #   
+          PBLH_ERA5_30min <- tibble(time=seq.POSIXt(from = min(PBLH_ERA5$time), to = max(PBLH_ERA5$time), by = "30 min"))
+          
+          # Join data # 
+          PBLH_ERA5_full <- PBLH_ERA5_30min %>% left_join(PBLH_ERA5 %>% select(value, time), by="time")
+          
+          # Approx # 
+          PBLH_ERA5_full <- PBLH_ERA5_full %>% mutate(value=na.approx(value))
+          
+          # If the last obs is 23:00, add one repeated row # 
+          if(hour(max(PBLH_ERA5_full$time))==23)  {
+            
+            PBLH_ERA5_full <- PBLH_ERA5_full %>% 
+              bind_rows(tibble(time=max(PBLH_ERA5_full$time)+minutes(30), 
+                               value=PBLH_ERA5_full %>% filter(PBLH_ERA5_full$time==max(PBLH_ERA5_full$time)) %>% 
+                                 pull(value)))
+          }
+          
+          # Convert to timestamp format # 
+          PBLH_ERA5_full <- PBLH_ERA5_full %>% mutate(TIMESTAMP_START=format(time, format = "%Y%m%d%H%M"))
+          
+          # Create a DF PBLH # 
+          PBLH_DF <- PBLH_ERA5_full %>% 
+            rename("PBLH_ERA"="value") %>% 
+            left_join(Fluxes %>% select(TIMESTAMP_START, PBLH), by="TIMESTAMP_START") %>% 
+            rename("PBLH_DATA"="PBLH") %>% 
+            select(-time)
+          
+          # Check if ERA is always ok and make a flag # 
+          PBLH_DF <- PBLH_DF %>% 
+            mutate(PBLH_QC=case_when(PBLH_ERA == -9999 & PBLH_DATA == -9999 ~ 4,   # 4: ERA and model absent
+                                     PBLH_ERA != -9999 ~ 2,                        # 2: ERA ok
+                                     PBLH_DATA == -9999 & PBLH_DATA != -9999 ~ 3)) # 3: DATA ok 
+          
+          # PBLH Choose # PBLH measured # 2 # PBLH from ERA # 3 # PBLH modelled #
+          PBLH_DF <- PBLH_DF %>% 
+            mutate(PBLH=case_when(PBLH_QC == 2 ~ PBLH_ERA,
+                                  PBLH_QC == 3 ~ PBLH_DATA,
+                                  PBLH_QC == 4 ~ NA))
+          
+          # 1 # PBLH measured chunk # 
+          
+          
+          ## TODO .... ##
+          #if() # Independent mesure of PBLH # 
+          
+          
+          # 2 # PBLH from ERA/modelled # Join the PBLH and associated data flag # 
+          # When PBLH measured is not available, use the best option Measured >> ERA >> Model >> NA
+          
+          if(any(PBLH_DF$PBLH_QC == 2)) { # When there is at least one valid PBLH measure from ERA # 
+            
+            # Count the number of PBLH estimated with ERA # 
+            count_QC <- PBLH_DF %>% count(PBLH_QC) 
+            
+            # Calculated percentage # 
+            count_QC <- count_QC %>% 
+              mutate(TOT=nrow(PBLH_DF)) %>% 
+              mutate(Perc=n/TOT*100)
+            
+            # Message # 
+            cat(warn(paste0('\n [!] PBLH is estimated using ERA5 data (',
+                            count_QC %>% filter(PBLH_QC==2) %>% pull(Perc),
+                            '% of records) for the ', site.ID, ' station.\n')))
+            
+          } 
+            
+          # Remove PBLH (modelled) from Fluxes table # 
+          Fluxes <- Fluxes %>% select(-PBLH)
+            
+          # Join the final ERA5 PBLH # 
+          Fluxes <- Fluxes %>% 
+            left_join(PBLH_DF %>% select(TIMESTAMP_START, PBLH, PBLH_QC), by="TIMESTAMP_START")
+          
+        } # Correct format chunk ending #
+        
+      } else { # No time and value columns #  
+          
+        # Message # 
+        cat(warn(paste0("\n [!] PBLH can't be estimated by ERA5 data (not available or data names don't match the requirements) for the ", site.ID, " station.\n")))
+        
+      }
+           
+    } # PBLH chunk END # QC will not exported # 
+      
     # Wind variables check 
     if(!(any(colnames(Fluxes) %in% c('WD', 'WS')))) # If WS/WD are not in the fluxes, check in the meteo file # 
       
