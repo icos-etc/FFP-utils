@@ -122,7 +122,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                  latitude>56 & latitude<64 & longitude>3 & longitude<12 ~ 32,
                                  latitude>72 & latitude<84 & longitude>9 & longitude<21 ~ 33,
                                  latitude>72 & latitude<84 & longitude>21 & longitude<33 ~ 35,
-                                 is.numeric(latitude) & is.numeric(longitude) ~ (floor((longitude + 180)/6) %% 60) + 1)
+                                 T ~ (floor((longitude + 180)/6) %% 60) + 1)
     
     EPSG.code <- dplyr::case_when(
                                   latitude>0 & latitude<84 & UTM.zone<10 ~ as.numeric(paste0(326, 0, UTM.zone)),
@@ -659,7 +659,6 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
         } # Condition if at least one FFP is computed and remaining savings ending...
           
-
         if(is.null(save.FFP.mtx.as)) {
           
           cat(warn(('\n [!] No FFP output matrices are saved')))
@@ -701,39 +700,64 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                    Y = as.vector(sapply(FFP.lat, rep, ((FFP.domain*2)/dx)+1)))
           } 
           
-          # Data handling and refining 
-          FFP.mtx <- as.data.frame(sapply(FFP.ls, function(x) x[['fclim_2d']]))
-          
-          colnames(FFP.mtx) <- sapply(1:length(FFP.ls), function(x) paste0('FFP_', x))
-          
+          # List of FFP matrices # 
+          FFP.mtx <- lapply(FFP.ls, function(x) x[['fclim_2d']])
+
           # Calculate scale and offset factors only if at least one not-NA matrix is returned
           if(any(QC != 1)) {
             
-            # Add a scaling factor for the FFP values (to reduce object size)
-            range.FFP <- range(FFP.mtx, na.rm=T)
+            # Global minimum
+            min_val <- Reduce(min, lapply(FFP.mtx, function(mat) min(mat, na.rm=TRUE)))
+            # Global maximum
+            max_val <- Reduce(max, lapply(FFP.mtx, function(mat) max(mat, na.rm=TRUE)))
+            # Compute the range
+            range.FFP <- c(min_val, max_val)
             
-            # Compute scale and offset factor 
-            # [http://james.hiebert.name/blog/work/2015/04/18/NetCDF-Scale-Factors.html]
-            nbits <- 16
+            # Define int16 range
+            type_min <- -32767 
+            type_max <- 32767
+            #fillvalue <- -32768 # Automatically set by terra # 
+
+            # Compute scale factor #
+            scale.factor <- (range.FFP[2]-range.FFP[1])/(type_max - type_min)
             
-            # stretch/compress data to the available packed range
-            scale.factor <- (range.FFP[2] - range.FFP[1]) / (2 ** nbits - 1)
+            # Compute offset # 
+            add.offset <- range.FFP[1]-scale.factor*type_min
             
-            # translate the range to be symmetric about zero
-            add.offset <- range.FFP[1] + 2 ** (nbits - 1) * scale.factor
+            # Create a named vector # 
+            scale.offset <- c(sf = scale.factor, ofst = add.offset)
             
-            scale.offset <- c(sf=scale.factor, ofst=add.offset)
-            # FFP.array <- FFP.array * 10^-7
+            # Scaling and clipping # 
+            FFP.mtx.scaled <- lapply(FFP.mtx, function(x) {
+              tmp <- as.integer(round((x - scale.offset['ofst']) / scale.offset['sf']))
+              tmp[tmp < type_min] <- type_min
+              tmp[tmp > type_max] <- type_max
+              tmp })
             
-            # Apply scale and offset to every matrix (DF column) # 
-            FFP.mtx.scaled <- as.data.frame(sapply(FFP.mtx, 
-                                                   function(x) as.integer(round((x - scale.offset['ofst'])/ scale.offset['sf']))))
+            # Free unused memory
+            rm(FFP.mtx)
+            rm(FFP.ls)
+            gc()
             
-            # Bind scaled matrix and coordinates - build the spatraster
-            r <- rast(cbind(FFP.grid, FFP.mtx.scaled), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))
+            # Rasters list # 
+            r_list <- lapply(FFP.mtx.scaled, function(x) {
+              tmp <- rast(cbind(FFP.grid, as.vector(x)), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))
+              tmp })
+            
+            # Clean the scaled matrix #
+            rm(FFP.mtx.scaled)
+            gc()
+            
+            # Create the multiband raster # 
+            r <- rast(r_list)
+            
+            # Add raster names # 
+            names(r) <- paste0("FFP_", 1:length(r_list))
             
             # Add scale and factor # Due to rounding, values can't be exactly the same 
             scoff(r) <- cbind(scale.offset['sf'], scale.offset['ofst'])
+           
+            r[[1]] %>% plot()
             
           } else {
             
@@ -742,32 +766,25 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
             
           }
           
-          
           ## Add raster metadata, in any case ##
           #metags(r) <- c(Identifier=paste0("FFP at ", site.ID, " - ", as_date(FFP.input.df.cur$TIMESTAMP)[1]))
-          metags(r) <- c(TITLE=paste0("Footprint estimation at the ", site.ID, " station"))
-          metags(r) <- c(CONTACT=paste0("Giacomo Nicolini and Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
-                                        "Euro-Mediterranean Center for Climate Change. ", 
-                                        "Email: giacomo.nicolini@cmcc.it; luca.difiore@cmcc.it"))
-          metags(r) <- c(CONVENTIONS="CF-1.8")
-          metags(r) <- c(CREATION_DATE=date())
-          metags(r) <- c(CREATOR=paste0("Giacomo Nicolini, ICOS Ecosystem Thematic Center, ", 
-                                        "Euro-Mediterranean Center for Climate Change, Viterbo, Italy; ",
-                                        "Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
-                                        "Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
-          metags(r) <- c(INSTITUTION=paste0("ICOS Ecosystem Thematic Center, 
-                                            Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
-          metags(r) <- c(KEYWORDS=paste0("Flux footprints"))
-          metags(r) <- c(LICENSE=paste0("CC-BY 4.0"))
-          metags(r) <- c(PRODUCT_VERSION=paste0("1.0"))
-          metags(r) <- c(PROJECT=paste0("Integrated Carbon Observation System"))
-          metags(r) <- c(REFERENCES=paste0("Kljun et al. (2015), doi:10.5194/gmd‐8‐3695‐2015"))
-          metags(r) <- c(HISTORY=paste0("G. Nicolini and L. Di Fiore", date(), sep=", "))
-          metags(r) <- c(SUBJECTS=paste0("Flux footprints"))
-          metags(r) <- c(VARIABLES=paste0("FFP"))
-          
-          # Add FFP QC in raster metadata # 
-          metags(r) <- c(QC=QC)
+          metags(r) <- c(
+            TITLE=paste0("Footprint estimation at the ", site.ID, " station"),
+            CONTACT=paste0("Giacomo Nicolini and Luca Di Fiore, ICOS Ecosystem Thematic Centre, ", 
+                           "Email: giacomo.nicolini@cmcc.it; luca.difiore@cmcc.it"),
+            CONVENTIONS="CF-1.8",
+            CREATION_DATE=date(),
+            CREATOR="ICOS Ecosystem Thematic Centre, Viterbo, Italy",
+            INSTITUTION="ICOS Ecosystem Thematic Centre, Viterbo, Italy",
+            KEYWORDS="Flux footprints",
+            LICENSE="CC-BY 4.0",
+            PRODUCT_VERSION="1.0",
+            PROJECT="Integrated Carbon Observation System",
+            REFERENCES="Kljun et al. (2015), doi:10.5194/gmd‐8‐3695‐2015",
+            HISTORY=paste0("ICOS Ecosystem Thematic Centre", date(), sep=", "),
+            SUBJECTS="Flux footprints",
+            VARIABLES="FFP",
+            QC=paste0(QC, collapse =" "))
           
           # Write the raster in a GTiff format # 
           cat(prog.mes('Saving the FFP array as multiband GeoTiff...'))
@@ -796,7 +813,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           }
           
           # Write the GTiff file #
-          writeRaster(r, filename = ffp.gtiffname, overwrite=T)
+          writeRaster(r, filename = ffp.gtiffname, overwrite=T, progress=F)
           
           # Save output message to log
           Log_list <- c(Log_list, '', paste0(unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d')), ': ', 
@@ -961,25 +978,37 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           if(any(FFP.input.list[['QC_Flag']]!=1)) {
             
             # Add a scaling factor for the FFP values (to reduce object size)
-            range.FFP <- range(FFP.mtx, na.rm=T)
+            # Global minimum
+            min_val <- Reduce(min, lapply(FFP.mtx, function(mat) min(mat, na.rm=TRUE)))
+            # Global maximum
+            max_val <- Reduce(max, lapply(FFP.mtx, function(mat) max(mat, na.rm=TRUE)))
+            # Compute the range
+            range.FFP <- c(min_val, max_val)
             
-            # Compute scale and offset factor 
-            # [http://james.hiebert.name/blog/work/2015/04/18/NetCDF-Scale-Factors.html]
-            nbits <- 16
+            # Define int16 range and fillvalue
+            type_min <- -32767 
+            type_max <- 32767
+            fillvalue <- -32768
             
-            # stretch/compress data to the available packed range
-            scale.factor <- (range.FFP[2] - range.FFP[1]) / (2 ** nbits - 1)
+            # Compute scale factor #
+            scale.factor <- (range.FFP[2]-range.FFP[1])/(type_max - type_min)
             
-            # translate the range to be symmetric about zero
-            add.offset <- range.FFP[1] + 2 ** (nbits - 1) * scale.factor
+            # Compute offset # 
+            add.offset <- range.FFP[1]-scale.factor*type_min
             
-            scale.offset = c(sf = scale.factor, ofst = add.offset)
-            # FFP.array <- FFP.array * 10^-7
+            # Create a named vector # 
+            scale.offset <- c(sf = scale.factor, ofst = add.offset)
             
-            # Create an array of FFP matrices, adding scaling and offset factors
-            FFP.array <- array()
-            FFP.array <- array(round((unlist(FFP.mtx, use.names = F) - scale.offset['ofst'])/ scale.offset['sf']), 
-                               dim = c(length(FFP.Xdim), length(FFP.Ydim), length(FFP.mtx)))
+            # Create an array of FFP matrices, using scale and offset factors
+            FFP.array <- array(NA_integer_, dim = c(length(FFP.Xdim), length(FFP.Ydim), length(FFP.mtx)))
+            for (i in seq_along(FFP.mtx)) {
+              FFP.array[,,i] <- round((FFP.mtx[[i]] - add.offset) / scale.factor)
+            }
+
+            # Data clipping # Prevents hidden rounding errors # 
+            FFP.array[FFP.array < type_min] <- type_min
+            FFP.array[FFP.array > type_max] <- type_max
+            #FFP.array <- pmin(pmax(FFP.array, type_min), type_max)
             
           } else {
             
@@ -994,14 +1023,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           rm(FFP.ls)
           gc()
           
-          # and convert to integers (to reduce object size)
-          # format(object.size(FFP.array), 'Gb')
-          mode(FFP.array) <- 'integer'
-          # format(object.size(FFP.array), 'Gb')
-          
-          # Add not scaled values as fill values # They are evaluated by scaling or offset #
           # Convert all NA's to the fillvalue used in the creation of nc file
-          fillvalue <- -9999
           FFP.array[is.na(FFP.array)] <- fillvalue
           
           # . * Create the netCDF filename and folder path 
@@ -1040,7 +1062,6 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                  units='m',
                                  longname="y coordinate of projection",
                                  vals=FFP.lat)
-          
           
           if(any(do.full.climatology, do.daily.climatology))  {
             
@@ -1427,8 +1448,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
           # Contact
           ncatt_put(ffp.ncout, 0, "Contact", 
-                    paste0("Giacomo Nicolini and Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
-                           "Euro-Mediterranean Center for Climate Change. ", 
+                    paste0("Giacomo Nicolini and Luca Di Fiore, ICOS Ecosystem Thematic Centre, ", 
                            "Email: giacomo.nicolini@cmcc.it; luca.difiore@cmcc.it"))
           
           # Conventions
@@ -1441,14 +1461,11 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
           # creator
           ncatt_put(ffp.ncout, 0, "creator", 
-                    paste0("Giacomo Nicolini, ICOS Ecosystem Thematic Center, ", 
-                           "Euro-Mediterranean Center for Climate Change, Viterbo, Italy; ",
-                           "Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
-                           "Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
+                    "ICOS Ecosystem Thematic Centre, Viterbo, Italy")
           
           # institution
           ncatt_put(ffp.ncout, 0, "institution", 
-                    "ICOS Ecosystem Thematic Center, Euro-Mediterranean Center for Climate Change, Viterbo, Italy")
+                    "ICOS Ecosystem Thematic Centre, Viterbo, Italy")
           
           # keywords
           ncatt_put(ffp.ncout, 0, "keywords", 
@@ -1477,15 +1494,15 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           if(return.isopleth) { 
             # summary
             ncatt_put(ffp.ncout, 0, "summary", 
-                      paste0("The file contains the footprint estimation and the quality layer of the station", 
-                             site.ID, "at 30-min of temporal resolution. Additionally, a geometry containing the ", which.FFP.R, "% isopleth boundary is provided. ", 
+                      paste0("The file contains the footprint estimation and the quality layer of the station ", 
+                             site.ID, " at 30-min of temporal resolution. Additionally, a geometry containing the ", which.FFP.R, "% isopleth boundary is provided. ", 
                              "PID code of input data: ", PID))
           } else {
             
             # summary
             ncatt_put(ffp.ncout, 0, "summary", 
-                      paste0("The file contains the footprint estimation and the quality layer of the station", 
-                             site.ID, "at 30-min of temporal resolution. ", "PID code of input data: ", PID))
+                      paste0("The file contains the footprint estimation and the quality layer of the station ", 
+                             site.ID, " at 30-min of temporal resolution. ", "PID code of input data: ", PID))
             
           }
           
@@ -1514,7 +1531,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
           ## history
           ncatt_put(ffp.ncout, 0, "history",
-                    paste("G. Nicolini and L. Di Fiore", date(), sep=", "))
+                    paste("ICOS Ecosystem Thematic Centre", date(), sep=", "))
           
           # Additional metadata ## 
           
@@ -1523,10 +1540,7 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
           
           # Contributors
           ncatt_put(ffp.ncout, 0, "Contributors", 
-                    paste0("Giacomo Nicolini, ICOS Ecosystem Thematic Center, ", 
-                           "Euro-Mediterranean Center for Climate Change, Viterbo, Italy; ",
-                           "Luca Di Fiore, ICOS Ecosystem Thematic Center, ", 
-                           "Euro-Mediterranean Center for Climate Change, Viterbo, Italy"))
+                    "ICOS Ecosystem Thematic Centre, Viterbo, Italy")
           
           # FundingReference
           #ncatt_put(ffp.ncout, 0, "FundingReference",
