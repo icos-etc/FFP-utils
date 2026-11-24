@@ -4,7 +4,7 @@
 
 doFFP=function(FFP.input.df=NULL,         # input dataframe
                EC.tower.coords=NULL,      # Ec tower coordinates (Lat, Lon)
-               UTC.offset=NULL,           # UTC offset of the site 
+               UTC.offset=NULL,           # UTC offset of the site
                site.ID=NULL,              # site.ID
                PID=NULL,                  # site PID
                FFP.function.path="local_functions/calc_footprint_FFP_climatology.R", # If specified, full path of FFP function, otherwise local path
@@ -17,31 +17,30 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                which.FFP.R = 70,          # Which isopleth save
                drop.trivial.srcs = TRUE,  # whether to remove point sources with a trivial contribution
                save.FFP.mtx.as='nc',      # csv, nc (NetCDF), gtiff(GeoTiff), NULL (no save)
-               save.plot.FFP.mtx = FALSE, # Whether to save a plot of the FFP2D (matrix and isoplethes, not the spatial polygons)
-               return.isopleth=TRUE,      # Return chosen isopleth in the netCDF file  
+               save.plot.FFP.mtx = FALSE, # Whether to save a plot of the FFP2D (matrix and isopleths, not the spatial polygons)
+               return.isopleth=TRUE,      # Return chosen isopleth in the netCDF file
                save.log=TRUE,             # Save messages files to log
                save.ncplot=TRUE,          # Save a sample plot of nc the file
-               do.full.climatology=FALSE, # Do full FFP climatology 
+               do.full.climatology=FALSE, # Do full FFP climatology
                do.daily.average=FALSE,    # Do daily FFP average
                skip=FALSE,                # Skip single days from computation
-               MDS.indices=FALSE,         # Calculates average FFPs where data is gap-filled # TRUE only in ETC internal pipeline    
+               MDS.indices=FALSE,         # Calculates average FFPs where data is gap-filled # TRUE only in ETC internal pipeline
                feel.lucky=FALSE,          # Calculate footprint for a random day
-               out.dir = NULL)            # If not null, the directory of the out file folder, otherwise the working directory is used  
+               out.dir = NULL)            # If not null, the directory of the out file folder, otherwise the working directory is used
 {
 
 
-
-  ##  
+  ##
   ## [0] PRELIMINARY PART -----
   ##
 
   # Install pacman
-  if (!require("pacman", quietly = T)) {install.packages("pacman")} 
+  if (!require("pacman", quietly = T)) {install.packages("pacman")}
   # Install EBImage
   if(!require("EBImage", quietly = T)) {pacman::p_load(BiocManager); BiocManager::install("EBImage")}
   # Load or install required packages via pacman
-  pacman::p_load(crayon, data.table, sf, ncdf4, terra, ggplot2, logr, purrr, dplyr, readr, lubridate, EBImage)
-  
+  pacman::p_load(crayon, data.table, sf, ncdf4, terra, ggplot2, logr, purrr, dplyr, readr, lubridate, stringr, EBImage)
+
   space="  "
 
   # Define message themes
@@ -49,108 +48,159 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
   warn <- crayon::yellow
   note <- crayon::silver
   prog.mes <- crayon::cyan
-  
-  # Load local functions if they aren't already loaded 
-  if(!exists('calc_footprint_FFP_climatology'))   {source(FFP.function.path)}
-  
-  
+
+  # Footprint model # An explicit FFP.function.path is always used; with the default path, a function already loaded in the session is kept
+  if(!missing(FFP.function.path) || !exists('calc_footprint_FFP_climatology')) {
+    if(!file.exists(FFP.function.path)) stop(paste0("FFP function file not found: ", FFP.function.path))
+    source(FFP.function.path)
+  } else {
+    cat(note("\nFFP function already loaded in the session is used (FFP.function.path not given)"))
+  }
+
+
   # Starting message
   # Defining the start message total length
-  message_total_length <- 86  
-  
+  message_total_length <- 86
+
   # Message text
   message_text <- paste0("------ ", bold(site.ID), ": FFP calculation and ", save.FFP.mtx.as, " file saving ------")
-  message_text_length <- nchar(crayon::strip_style(message_text)) 
-  
+  message_text_length <- nchar(crayon::strip_style(message_text))
+
   # Real margin
   margin <- strrep(" ", max(0, floor((message_total_length - message_text_length) / 2)))
-  
+
   # Final cat
   cat('\n', strrep('*', message_total_length), sep='')
   cat('\n', margin, prog.mes(message_text), sep='')
   cat('\n', strrep('*', message_total_length), '\n', sep='')
-  
-  
+
+
   # If DF is character (and then csv path), read it
   if(is.character(FFP.input.df)) {
-    FFP.input.df <- read_csv(FFP.input.df, col_types = cols())
+    # Path of the csv, kept to read the file again if needed
+    FFP.input.path <- FFP.input.df
+    FFP.input.df <- read_csv(FFP.input.path, col_types = cols())
+
+    # Check if the MDS indices is in the column list # Same reading as in CPtoFFPinput
+    if(any(colnames(FFP.input.df) %in% "MDS_Idx"))  {
+
+      # Read the file again, with the indices as text (comma-separated list) #
+      FFP.input.df <- read_csv(FFP.input.path, col_types = cols(.default = col_guess(), MDS_Idx = col_character()))
+
+      # Change the string column in a vector list # Empty cells (not gap-filled) become NULL
+      FFP.input.df <- FFP.input.df %>%
+        mutate(MDS_Idx = map(MDS_Idx, function(x) if (is.na(x) || x == "NULL") NULL else as.numeric(str_split(x, ",")[[1]])))
+    }
+
     FFP.input.df$'TIMESTAMP' <- with_tz(FFP.input.df$'TIMESTAMP', tz ='GMT') # Set the correct timezone
   }
 
+  # Change nodata values (from -9999 to NA), as in CPtoFFPinput # Any input (csv or dataframe) # Only numeric columns (MDS_Idx is a list) #
+  if(is.data.frame(FFP.input.df)) {
+
+    # Number of -9999 values per column
+    n.9999 <- sapply(FFP.input.df[sapply(FFP.input.df, is.numeric)], function(x) sum(x == -9999, na.rm = TRUE))
+
+    if(any(n.9999 > 0)) {
+      cat(warn(paste0("\n [!] -9999 values of the input table converted to NA (missing): ",
+                      paste0(names(n.9999)[n.9999 > 0], " ", n.9999[n.9999 > 0], collapse = ", "), "\n")))
+      FFP.input.df <- FFP.input.df %>% mutate(across(where(is.numeric), ~ na_if(.x, -9999)))
+    }
+  }
+
   # Warn if the DF TZ is not GMT #
-  if(tz(FFP.input.df$TIMESTAMP) != "GMT") {
+  if(is.data.frame(FFP.input.df) && tz(FFP.input.df$TIMESTAMP) != "GMT") {
     cat(warn(paste0("The time zone of the input dataframe is not GMT, it shoud be corrected")))
   }
-  
+
   # Inputs availability check
   if(is.null(FFP.input.df)){
-    cat(error(paste0("\nERROR: No FFP input dataframe is specified for the station. FFP calculation is skipped!\n")))
-    
+    stop("No FFP input dataframe is specified for the station")
+
   } else if(all(is.null(site.ID), !(any(colnames(FFP.input.df) %in% c("site_id"))))) {
-    cat(error(paste0("\nERROR: No site ID is specified for the station. FFP calculation is skipped!\n")))
-    
+    stop("No site ID is specified for the station (site.ID argument or site_id column)")
+
   } else if(all(is.null(EC.tower.coords), !(any(colnames(FFP.input.df) == "lat")))) {
-    cat(error(paste0("\nERROR: No latitude is specified for the station. FFP calculation is skipped!\n")))
-    
+    stop("No latitude is specified for the station (EC.tower.coords argument or lat column)")
+
   } else if(all(is.null(EC.tower.coords), !(any(colnames(FFP.input.df) == "lon")))) {
-    cat(error(paste0("\nERROR: No longitude is specified for the station. FFP calculation is skipped!\n")))
-    
+    stop("No longitude is specified for the station (EC.tower.coords argument or lon column)")
+
   } else {
-    
-    
-    
+
+
     ##
     ## [1] DATAFRAME MANIPULATION -----
     ##
-    
-    # Starting message 
+
+    # Starting message
     cat(prog.mes(paste0('\n', bold('[1]'),' FFP input data manipulation\n')))
 
     # Move site id, coordinates and PID outside the DF, if necessary....
     # EC tower coordinates
     if(is.null(EC.tower.coords)) {
-      
+
       EC.tower.coords <- c(unique(FFP.input.df$lat), unique(FFP.input.df$lon))
-      
+
       # Remove them from DF
       FFP.input.df$lat <- NULL
       FFP.input.df$lon <- NULL
     }
-    
+
     # Site id
     if(is.null(site.ID)) {
-      
+
       site.ID <- unique(FFP.input.df$site_id)
-      
+
       # Remove it from DF
       FFP.input.df$site_id <- NULL
     }
-    
-    # PID
-    if(all(is.null(PID), colnames(FFP.input.df) %in% 'PID')) {
-      
-      PID <- unique(FFP.input.df$PID)
-      
+
+    # PID # Taken from the table only if not given as argument
+    if(is.null(PID) & 'PID' %in% colnames(FFP.input.df)) {
+
+      PID <- FFP.input.df$PID %>% na.omit() %>% unique()
+
+      # Only one valid PID is accepted, otherwise it is left empty
+      if(length(PID) != 1) {
+        cat(warn("\nPID column of the input table missing or not unique: PID left empty"))
+        PID <- NULL
+      }
+
       # Remove it from DF
       FFP.input.df$PID <- NULL
     }
-    
-    # Check for NAs in the variables created, and in necessary stop the function # 
+
+    # UTC offset # Taken from the table only if not given as argument
+    if(is.null(UTC.offset) & "UTC_offset" %in% colnames(FFP.input.df)) {
+
+      UTC.offset <- FFP.input.df$UTC_offset %>% na.omit() %>% unique()
+    }
+
+    # Only one site and one pair of coordinates are accepted # Multiple values can only come from tables combined or edited by hand
+    if(length(site.ID) != 1) {
+      stop(paste0("One site per call: site IDs found: ", paste(site.ID, collapse = ", ")))
+    }
+    if(length(EC.tower.coords) != 2) {
+      stop(paste0("Tower coordinates must be one latitude and one longitude: values found: ", paste(EC.tower.coords, collapse = ", ")))
+    }
+
+    # Check for NAs in the variables created, and in necessary stop the function #
     stopifnot('Site ID is NA' = !is.na(site.ID), 'Tower coordinates are NAs' = !is.na(EC.tower.coords))
-    
+
     # Assign coordinates to a variable
     latitude <- EC.tower.coords[1]
     longitude <- EC.tower.coords[2]
-    
+
     # Check for the coordinates format (decimal)
     stopifnot(is.numeric(latitude), is.numeric(longitude), latitude < 90 & latitude > -90)
-    
-    UTM.zone <- dplyr::case_when( 
+
+    UTM.zone <- dplyr::case_when(
                                  latitude>56 & latitude<64 & longitude>3 & longitude<12 ~ 32,
                                  latitude>72 & latitude<84 & longitude>9 & longitude<21 ~ 33,
                                  latitude>72 & latitude<84 & longitude>21 & longitude<33 ~ 35,
                                  T ~ (floor((longitude + 180)/6) %% 60) + 1)
-    
+
     EPSG.code <- dplyr::case_when(
                                   latitude>0 & latitude<84 & UTM.zone<10 ~ as.numeric(paste0(326, 0, UTM.zone)),
                                   latitude>0 & latitude<84 & UTM.zone>=10 ~ as.numeric(paste0(326, UTM.zone)),
@@ -158,53 +208,53 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                   latitude<0 & latitude>-80 & UTM.zone>=10 ~ as.numeric(paste0(327, UTM.zone)),
                                   latitude > 84 & latitude < 90 ~ 32661,
                                   latitude < -80 & latitude > -90 ~ 32761)
-    
-    EC.tower <- sf::st_as_sf(x=data.frame(lat=EC.tower.coords[1], lon=EC.tower.coords[2]), 
+
+    EC.tower <- sf::st_as_sf(x=data.frame(lat=EC.tower.coords[1], lon=EC.tower.coords[2]),
                              coords = c('lon', 'lat'), crs=4326)
 
     # EC coordinates in UTM
     EC.tower.utm <- as.vector(st_coordinates(st_transform(EC.tower, EPSG.code)))
-    
+
     if(is.null(out.dir))  {
-      
+
       # Create main output directory (and eventually site directory)
       Site_dir <- paste0(getwd(), '/', site.ID)
       FFP.output.dir <- paste0(getwd(), '/', site.ID, '/', 'Output')
-      
+
     } else  {
-      
+
       # Create main output directory (and eventually site directory)
       Site_dir <- paste0(out.dir, '/', site.ID)
       FFP.output.dir <- paste0(out.dir, '/', site.ID, '/', 'Output')
-      
+
     }
-    
+
     if(!dir.exists(Site_dir)) {dir.create(Site_dir)}
     if(!dir.exists(FFP.output.dir)) {dir.create(FFP.output.dir)}
-    
+
     # NON sensitive variables # These variables are filled with LOCF independently from the gap length(s)
     is.na_nsv <- lapply(FFP.input.df[c('hm', 'hc', 'd', 'z0', 'zm')], function(x) sum(is.na(x)))
 
-    FFP.input.df[c('hm', 'hc', 'd', 'z0', 'zm')] <- lapply(FFP.input.df[c('hm', 'hc', 'd', 'z0', 'zm')], 
+    FFP.input.df[c('hm', 'hc', 'd', 'z0', 'zm')] <- lapply(FFP.input.df[c('hm', 'hc', 'd', 'z0', 'zm')],
                                                            function(x) data.table::nafill(x, type = 'locf'))
-    
-    invisible(sapply(names(is.na_nsv), function(x) cat(note(paste0('\n- ', is.na_nsv[[x]], 
-                                                                   ' missing values of ', bold(x), 
+
+    invisible(sapply(names(is.na_nsv), function(x) cat(note(paste0('\n- ', is.na_nsv[[x]],
+                                                                   ' missing values of ', bold(x),
                                                                    ' have been filled using LOCF.')))))
-    
-    # LOG file starting messages 
+
+    # LOG file starting messages
     Log_list <- list()
-    
+
     Log_list[[1]] <- paste0('###### Computing the footprints for the ', site.ID, ' station ######')
     Log_list[[2]] <- '' # Blank space
     Log_list[[3]] <- '------ FFP input data manipulation (gap-filling) ------'
     Log_list[[4]] <- '' # Blank space
-    Log_list <- c(Log_list,sapply(names(is.na_nsv), 
-                                  function(x) paste0('- ', is.na_nsv[[x]], ' missing values of ', x, 
+    Log_list <- c(Log_list,sapply(names(is.na_nsv),
+                                  function(x) paste0('- ', is.na_nsv[[x]], ' missing values of ', x,
                                                      ' have been filled using LOCF.'), USE.NAMES = F), '')
-    
+
     # Sensitive variables # These variables are filled with LOCF only if gaps are shorter than 2 hours
-    
+
     for(i in c('umean', 'ol', 'sigmav', 'ustar', 'wind_dir')) {
 
         isna <- sum(is.na(FFP.input.df[[i]]))                                           # count the NAs
@@ -212,339 +262,437 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
         isna.rle$'values' <- isna.rle$'values' & isna.rle$'lengths' > max.gap           # Re-write the values when NAs come by more than 4: these will not be filled
         isna.f <- which((is.na(FFP.input.df[[i]]) - inverse.rle(isna.rle)) != 0)        # store gapfilled umean indexes
         # FFP.input.df$'TIMESTAMP'[which((is.na(FFP.input.df$'umean') - inverse.rle(isna.umean.rle)) != 0)]   # See which half-hour will have gapfilled umean
-        
-        cat(note(paste0('\n- ', as.character(isna), ' missing values of ', bold(i), ' have been found, but only ', 
+
+        cat(note(paste0('\n- ', as.character(isna), ' missing values of ', bold(i), ' have been found, but only ',
                         bold(as.character(length(isna.f))) ,' have been filled using LOCF lasting for less than 2 hours.')))
         FFP.input.df[[i]] <- data.table::nafill(FFP.input.df[[i]], type = 'locf')       # Fill every NAs
         FFP.input.df[[i]][inverse.rle(isna.rle)] <- NA                                  #  use inverse.rle to build the vector of indices to re-set to NA (longer gaps
-        
+
         # Add message to log list
         Log_list <- c(Log_list, paste0('- ', as.character(isna), ' missing values of ', i,
-                                       ' have been found, but only ', as.character(length(isna.f)), 
+                                       ' have been found, but only ', as.character(length(isna.f)),
                                        ' have been filled using LOCF lasting for less than 2 hours'))
     }
-    
-    
-    
+
+
     ##
     ## [1.1] DATAFRAME ADDITIONAL MANIPULATION: CLIMATOLOGY-AVERAGE OPTIONS AND TIME ZONE -----
     ##
-    
+
     # Single FFP #
     # if timestamp is reported as ISO (character), convert it to a time object
-    if (!any(grepl('POSIX', class(FFP.input.df$'TIMESTAMP')))) { 
+    if (!any(grepl('POSIX', class(FFP.input.df$'TIMESTAMP')))) {
       FFP.input.df$'TIMESTAMP' <- as_datetime(FFP.input.df$'TIMESTAMP', tz ='GMT')
-    } 
-    
-    stopifnot('Choose one between do.climatology and do.daily.average' = 
+    }
+
+    stopifnot('Choose one between do.climatology and do.daily.average' =
                 !(do.full.climatology == T & do.daily.average == T))
 
     # Climatology and MDS error #
-    stopifnot('Choose one between climatology-average options and MDS' = 
+    stopifnot('Choose one between climatology-average options and MDS' =
                 !(all(any(do.full.climatology, do.daily.average), MDS.indices)))
-    
-    # Set the correct time format # 
+
+    # Set the correct time format #
     time_format='%Y-%m-%d %H:%M'
 
     # If climatology, modify the single timestamp keeping only the start day #
-    if(do.full.climatology)  { # Calculate the overall mean FFP # 
-      
+    if(do.full.climatology)  { # Calculate the overall mean FFP #
+
       if(any(skip))
       {
         # Filter the input dataframe according to the skip parameter #
-        if(all(length(skip) != length(unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))), length(skip) != 1)) 
+        if(all(length(skip) != length(unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))), length(skip) != 1))
         {stop("Skip vector length is not equal than input DF days length")}
-        
+
         else { # Filter the dataframe according to the skip parameter # Then change the skip parameter #
         FFP.input.df <- FFP.input.df[as_date(FFP.input.df$TIMESTAMP, tz ='GMT') %in% (unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))[!skip]), ]
-        
+
         skip=F
-        
+
         }
       }
-      
-      # DF filtering # If the MDS obs are available, calculate the climatology FFP using only the valid ones # 
+
+      # Requested days, kept for the warning when nothing can be computed #
+      days.requested <- unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))
+
+      # DF filtering # If the MDS obs are available, calculate the climatology FFP using only the valid ones #
       if(any(colnames(FFP.input.df) %in% "MDS_Idx"))  {
-        
+
         cat(warn("\nFiltering out the Gap-filled observation from the climatology calculation"))
-        
-        FFP.input.df=FFP.input.df[sapply(FFP.input.df$MDS_Idx, is.null), ]  
-        
+
+        FFP.input.df=FFP.input.df[sapply(FFP.input.df$MDS_Idx, is.null), ]
+
       }
-      
-      # Set the first and last day # 
+
+      # Set the first and last day #
       first_day <- min(as_date(FFP.input.df$'TIMESTAMP', tz ='GMT'))
       last_day <- max(as_date(FFP.input.df$'TIMESTAMP', tz ='GMT'))
-      
-      # Set the correct time format # 
+
+      # Set the correct time format #
       time_format <- '%Y-%m-%d'
-      
-      # Modify the timestamp to keep only the first one # 
+
+      # Modify the timestamp to keep only the first one #
       FFP.input.df$'TIMESTAMP' <- as_date(FFP.input.df$'TIMESTAMP', tz ='GMT')[1]
-      
+
       # Drop nas (only for climatology-average options) #
       FFP.input.df <- na.omit(FFP.input.df)
-      
+
+      # Nothing to compute: no file is produced, with a warning #
+      if(nrow(FFP.input.df) == 0) {
+        cat(warn(paste0("\n [!] No valid half-hours for the full climatology (", min(days.requested), " - ", max(days.requested),
+                        "): no file is produced")))
+      }
+
     }
-    
+
     # Compute the daily average, if required #
-    if(do.daily.average)  { # Calculate the daily mean FFP # 
-      
+    if(do.daily.average)  { # Calculate the daily mean FFP #
+
       if(any(skip))
       {
         # Filter the input dataframe according to the skip parameter #
-        if(all(length(skip) != length(unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))), length(skip) != 1)) 
+        if(all(length(skip) != length(unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))), length(skip) != 1))
         {stop("Skip vector length is not equal than input DF days length")}
-        
+
         else { # Filter the dataframe according to the skip parameter # Then change the skip parameter #
           FFP.input.df <- FFP.input.df[as_date(FFP.input.df$TIMESTAMP, tz ='GMT') %in% (unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))[!skip]), ]
-          
+
           skip=F
-          
+
         }
       }
-      
-      # DF filtering # If the MDS obs are available, calculate the average using only the valid ones # 
+
+      # Requested days, kept for the warning on the days with nothing to compute #
+      days.requested <- unique(as_date(FFP.input.df$TIMESTAMP, tz ='GMT'))
+
+      # DF filtering # If the MDS obs are available, calculate the average using only the valid ones #
       if(any(colnames(FFP.input.df) %in% "MDS_Idx"))  {
-        
+
         cat("\n")
         cat(warn("\nFiltering out the Gap-filled observation from the average calculation"))
-        
-        FFP.input.df=FFP.input.df[sapply(FFP.input.df$MDS_Idx, is.null), ]  
-        
+
+        FFP.input.df=FFP.input.df[sapply(FFP.input.df$MDS_Idx, is.null), ]
+
       }
-      
-      # Set the correct time format # 
+
+      # Set the correct time format #
       time_format <- '%Y-%m-%d'
-      
-      # Modify the timestamp to keep only the daily timestamp # 
+
+      # Modify the timestamp to keep only the daily timestamp #
       FFP.input.df$'TIMESTAMP' <- as_date(FFP.input.df$'TIMESTAMP', tz ='GMT')
-      
+
       # Drop nas (only for climatology-average options) #
       FFP.input.df <- na.omit(FFP.input.df)
-      
+
+      # Days with nothing to compute: no file is produced, with a warning #
+      days.empty <- days.requested[!(days.requested %in% FFP.input.df$TIMESTAMP)]
+
+      if(length(days.empty) > 0) {
+        cat(warn(paste0("\n [!] ", length(days.empty), " days without valid half-hours for the daily average, no file is produced: ",
+                        paste(days.empty, collapse = ", "))))
+      }
+
     }
-    
+
+    # Temporal resolution of the product, for the summary attribute of the output files #
+    summary.res <- if(do.full.climatology) {"as average over the full period"} else if(do.daily.average) {"as daily average"} else {"at 30-minute temporal resolution"}
+
     # Create a days factor to split the dataset into daily chunks
     days.factor <- as.factor(format(FFP.input.df$'TIMESTAMP', '%Y%m%d', tz = "GMT"))
-    
-    # skip length check 
-    if(all(length(skip) != length(levels(days.factor)), length(skip) != 1)) 
-    {error("Skip vector length is not equal than input DF days length")}
-    
-    
-    ## -- TIME ZONE -- ## 
-    
-    if(is.null(UTC.offset)) {
-    
-      cat(error("Station UTC offset missing!"))
-      
+
+    # skip length check
+    if(all(length(skip) != length(levels(days.factor)), length(skip) != 1))
+    {stop("Skip vector length is not equal than input DF days length")}
+
+
+    ## -- TIME ZONE -- ##
+
+    if(is.null(UTC.offset) || length(UTC.offset) != 1 || is.na(UTC.offset)) {
+
+      stop("Station UTC offset missing (or not unique): pass UTC.offset or a table with a UTC_offset column")
+
       #cat(warning("Retrieve the UTC offset from the EC tower position. It may differ from the UTC offset of the data"))
       #
       #pacman::p_load(lutz)
       # # Get the correct time zone from tower coordinates #
       # station_tz <- tz_lookup_coords(EC.tower.coords[1], EC.tower.coords[2], method = "accurate")
-      # 
+      #
       # # Calculate the perpetual solar offset (Take a random winter date)
-      # winter_date <- as.Date(paste0(year(FFP.input.df$TIMESTAMP[1]), "-01-01"))            
+      # winter_date <- as.Date(paste0(year(FFP.input.df$TIMESTAMP[1]), "-01-01"))
       # time_offset_hours <- tz_offset(winter_date, station_tz)$utc_offset_h
-      # 
+      #
       # time_offset_hours <- tz_offset("2024-01-01", station_tz)$utc_offset_h
-    
-    } else  { # Get the time zone from the input data
-      
-      time_offset_hours=UTC.offset  
-      
+
     }
-    
-    # Create the offset string 
+
+    # Get the time zone from the input data
+    time_offset_hours <- UTC.offset
+
+    # Create the offset string
     time_offset_string <- sprintf("%+03d:00", time_offset_hours)
-    
-    # Customize domain # When a global domain is provided 
+
+    # Customize domain # When a global domain is provided
     if(!is.null(FFP.domain)) {FFP.domain.ext <- FFP.domain * c(-1, 1,-1, 1)}
-    
-    # Total dys available # 
+
+    # MDS indices: the Idx and MDS_Idx columns are needed (they are added by CPtoFFPinput only on the whole dataset)
+    if(MDS.indices && !all(c("Idx", "MDS_Idx") %in% colnames(FFP.input.df))) {
+      stop("MDS.indices = TRUE needs the Idx and MDS_Idx columns: run CPtoFFPinput with MDS.file and without start/end dates")
+    }
+
+    # Extent and resolution: both given as arguments, or none of them (then taken from the input table)
+    if(xor(is.null(FFP.domain), is.null(dx))) {
+      stop("Provide both FFP.domain and dx, or none of them (then Extent and Resolution are taken from the input table)")
+    }
+
+    # Extent and resolution taken from the input table, day by day, only when both are not given as arguments # Decided once
+    domain.from.table <- is.null(FFP.domain) & is.null(dx)
+
+    # Total dys available #
     lev_days <- levels(days.factor)
-    
-    # Feel lucky? # Process a single random day # 
+
+    # Feel lucky? # Process a single random day #
     if(feel.lucky)  {
-      
+
       if (feel.lucky && length(skip) > 0 && !all(skip == FALSE)) {
         stop("Choose one between skip and feel.lucky")
       }
-      
+
         lev_days <- sample(lev_days, 1)
-        
+
     }
-    
+
     cat('\n')    ### -- DF MANIPULATION ENDING -- ###
     cat('\n', strrep('*', message_total_length), sep='')
-    
-    
-    
+
+
     ##
     ## [2] FFP CALCULATION -----
     ##
-    
+
     for (i.day in lev_days[!skip]) {
-      
+
       # Split the input into days chunks and grab the current one
-      FFP.input.df.cur <- data.frame() 
+      FFP.input.df.cur <- data.frame()
       FFP.input.df.cur <- tibble(split(FFP.input.df, days.factor)[[i.day]])
-      
+
       # Set the current day #
       current_day <- unique(as_date(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT")))
-      
+
       # Set the current day string #
       current_day_str <- unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d', tz = "GMT"))
-      
-      ## Warn if the current df legnth is zero ## 
+
+      ## Warn if the current df length is zero ##
       if(nrow(FFP.input.df.cur) == 0) {
-        
+
         cat(warn(paste0(i.day, ": input data is not available")))
-        
+
         next
-      } 
-      
-      # Retrieving Custom dxtent and resolution # When FFP domanin and res is null, search in the input table # 
-      if(all(is.null(FFP.domain), is.null(dx))) {
-        
-        # If the columns are null, stop # 
-        stopifnot('No Extent resolution provided' = !all(is.null(FFP.input.df.cur$Resolution)), 
+      }
+
+      # Half-hourly product: warning if the half-hours of the day are not the 48 of the 00:00-23:30 grid (number or time values) # Data unchanged
+      if(all(do.full.climatology == F, do.daily.average == F)) {
+
+        day.grid <- seq(as.POSIXct(paste(current_day_str, "00:00"), tz = "GMT"), by = "30 min", length.out = 48)
+        day.ts <- FFP.input.df.cur$TIMESTAMP
+
+        if(!(length(day.ts) == 48 && setequal(day.ts, day.grid))) {
+
+          half.hours.msg <- paste0(i.day, ": ", length(day.ts), " half-hours instead of the 48 of the 00:00-23:30 grid (",
+                                   sum(!(day.grid %in% day.ts)), " missing, ", sum(!(day.ts %in% day.grid)), " off-grid, ",
+                                   sum(duplicated(day.ts)), " duplicated) - the file has ", length(unique(day.ts)), " time steps")
+          cat(warn(paste0("\n [!] ", half.hours.msg)))
+          Log_list <- c(Log_list, paste0("[!] ", half.hours.msg), '')
+        }
+      }
+
+      # Retrieving custom extent and resolution # When FFP domain and res are null, search in the input table #
+      if(domain.from.table) {
+
+        # If the columns are null, stop #
+        stopifnot('No Extent resolution provided' = !all(is.null(FFP.input.df.cur$Resolution)),
                   'No Extent extent provided' = !all(is.null(FFP.input.df.cur$Extent)))
-        
+
         # Get the extent and resolution from the columns in the file #
         FFP.domain=unique(FFP.input.df.cur$Extent)
         dx=unique(FFP.input.df.cur$Resolution)
-        
-        # If multiple resolutions # Error # 
+
+        # If multiple resolutions # Error #
         stopifnot('Multiple extents' = length(FFP.domain)==1, 'Multiple resolutions' = length(dx)==1)
-        
+
+        # Missing extent or resolution for the day (e.g. year not in the lookup table) # Day not processed
+        if(anyNA(c(FFP.domain, dx))) {
+          cat(warn(paste0(i.day, ": extent or resolution missing in the input table - day not processed")))
+          next
+        }
+
       }
-      
-      # Retrieve the bounding box # 
+
+      # Retrieve the bounding box #
       FFP.domain.ext <- FFP.domain * c(-1, 1,-1, 1)
-      
+
       # Starting message
       # Defining the start message total length
-      message_total_length <- 86  
-      
+      message_total_length <- 86
+
       # Message text
       message_text <- paste0('------ ', bold(current_day_str), ': ', 'Start of calculations ------')
-      message_text_length <- nchar(crayon::strip_style(message_text)) 
-      
+      message_text_length <- nchar(crayon::strip_style(message_text))
+
       # Real margin
       margin <- strrep(" ", max(0, floor((message_total_length - message_text_length) / 2)))
-      
+
       # Final cat
       cat('\n', margin, prog.mes(message_text), '\n', sep='')
-      
+
       # Quantify survived NAs from input data (don't drop them!)
-      rows.na <- nrow(FFP.input.df.cur[, !(names(FFP.input.df.cur) %in% c("MDS_Idx"))]) - 
+      rows.na <- nrow(FFP.input.df.cur[, !(names(FFP.input.df.cur) %in% c("MDS_Idx"))]) -
         nrow(na.omit(FFP.input.df.cur[, !(names(FFP.input.df.cur) %in% c("MDS_Idx"))]))
-      cat(warn(paste0('\n[NOTE] ', #bold(current_day_str), ': ', 
+      cat(warn(paste0('\n[NOTE] ', #bold(current_day_str), ': ',
                       bold(as.character(rows.na)), ' rows ','(',as.character(round(rows.na/nrow(FFP.input.df.cur)*100)),'% of data) are data gaps that cannot be filled.\n')))
-      
+
       # Add messages to log
-      Log_list <- c(Log_list, '', '', 
+      Log_list <- c(Log_list, '', '',
                     paste0('------ ', current_day_str, ': ', 'start of calculations ------'), '')
-      
-      Log_list <- c(Log_list, paste0('[NOTE] ', #current_day_str, ': ', 
+
+      Log_list <- c(Log_list, paste0('[NOTE] ', #current_day_str, ': ',
                                      as.character(rows.na), ' rows ','(',as.character(round(rows.na/nrow(FFP.input.df.cur)*100)),
                                      '% of data) are data gaps that cannot be filled.'), '')
-      
-      # Check (here) if there are all NA values and remove them   
-      if(all(complete.cases(FFP.input.df.cur[, which(names(FFP.input.df.cur) == "d"):which(names(FFP.input.df.cur) == "PBL")]) == F)) {
-          
-        cat(warn(paste0('\n [!] ', #bold(current_day_str), ': ',  
+
+      # Rows that can be computed: complete rows, or (with MDS) gap-filled rows, computed from the MDS sources
+      rows.ok <- complete.cases(FFP.input.df.cur[, which(names(FFP.input.df.cur) == "d"):which(names(FFP.input.df.cur) == "PBL")])
+      if(MDS.indices) rows.ok <- rows.ok | !sapply(FFP.input.df.cur$MDS_Idx, is.null)
+
+      # Check (here) if there are all NA values and remove them
+      if(!any(rows.ok)) {
+
+        cat(warn(paste0('\n [!] ', #bold(current_day_str), ': ',
                         'no input data is available - model is not computed - no file is produced', '\n')))
-        
+
         # Add messages to log
-        Log_list <- c(Log_list, '', paste0('[!] ', #current_day_str, ': ',  
+        Log_list <- c(Log_list, '', paste0('[!] ', #current_day_str, ': ',
                                            'no input data is available - model is not computed - no file is produced'), '')
-        
+
       } else {
-        
+
         if(all(do.full.climatology == F, do.daily.average==F))  {
-          
-          cat(prog.mes(paste0('\n', bold('[2]'), #bold(current_day_str), ': ', 
+
+          cat(prog.mes(paste0('\n', bold('[2]'), #bold(current_day_str), ': ',
                               ' Computing the half-hourly 2D footprint for all the timestamps at once', '\n')))
-          
+
           Log_list <- c(Log_list, paste0("FFP type: half-hourly"))
-          
+
         } else if(do.daily.average == T) {
-          
-          cat(prog.mes(paste0('\n', bold('[2]'), #bold(current_day_str),': ', 
+
+          cat(prog.mes(paste0('\n', bold('[2]'), #bold(current_day_str),': ',
                               ' Computing the 2D daily footprint average'), '\n'))
-          
+
           Log_list <- c(Log_list, paste0("FFP type: daily average"))
-          
+
         } else if(do.full.climatology == T) {
-          
+
           cat(prog.mes(paste0('\n', bold('[2]'), #bold(first_day), bold('-'), bold(last_day), ': ',
                               ' Computing the 2D footprint climatology for the full dataset provided', '\n')))
-          
+
           Log_list <- c(Log_list, paste0("FFP type: full climatology"))
-          
+
         }
-        
+
         # MDS conditional #
         if(MDS.indices)
         {
-          
-          # hybrid list, nested map ## 
-          FFP.input.list.cur <- map2(.x = split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP), 
-                                     .y = map(FFP.input.df.cur$MDS_Idx, function(x) 
-                                       FFP.input.df[FFP.input.df$Idx %in% x, ]), 
+
+          # MDS sources of each half-hour #
+          MDS.src <- map(FFP.input.df.cur$MDS_Idx, function(x) FFP.input.df[FFP.input.df$Idx %in% x, ])
+
+          # Gap-filled half-hours with MDS sources not found in the input table (e.g. table cut in time) # Warning only
+          n.src.missing <- sum(map_lgl(FFP.input.df.cur$MDS_Idx, function(x) any(!(x %in% FFP.input.df$Idx))))
+
+          if(n.src.missing > 0) {
+            cat(warn(paste0('\n', space, '[!] ', n.src.missing, ' gap-filled half-hours with MDS sources not found in the input table: ',
+                            'with MDS.indices the full table must be passed (select the days with skip)')))
+            Log_list <- c(Log_list, paste0('[!] ', n.src.missing, ' gap-filled half-hours with MDS sources not found in the input table'), '')
+          }
+
+          # Sources with missing model inputs are discarded # One NA would make the whole averaged FFP fail
+          MDS.src.ok <- map(MDS.src, function(s) s[complete.cases(s[, c('zm', 'z0', 'PBL', 'ol', 'sigmav', 'ustar', 'wind_dir')]), ])
+          n.src.discarded <- sum(map_int(MDS.src, nrow)) - sum(map_int(MDS.src.ok, nrow))
+
+          if(n.src.discarded > 0) {
+            cat(warn(paste0('\n', space, '[!] ', n.src.discarded, ' MDS source half-hours with missing inputs discarded')))
+            Log_list <- c(Log_list, paste0('[!] ', n.src.discarded, ' MDS source half-hours with missing inputs discarded'), '')
+          }
+
+          # hybrid list, nested map ##
+          FFP.input.list.cur <- map2(.x = split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP),
+                                     .y = MDS.src.ok,
                                      ~ if(nrow(.y) != 0)  {.y} else {.x})
-          
+
         } else  {
-          
+
           FFP.input.list.cur <- split(FFP.input.df.cur, FFP.input.df.cur$TIMESTAMP)
-          
+
         }
-       
-        
+
+
         ## FFP main function ##
-        if(do.parallel) {
-          
-          # FFP calculation (future parallel)
-          pacman::p_load(furrr)
-          plan(multisession, workers=n.workers) # By default: low number of workers to avoid PC crashing
-          
-          # FFP calculation #
-          FFP <- future_map(FFP.input.list.cur, 
-                            function(x) { 
-                              tryCatch(
-                                {res <- calc_footprint_FFP_climatology(
-                                  zm = x$zm,
-                                  z0 = x$z0,
-                                  umean = x$umean,
-                                  h = x$PBL,
-                                  ol = x$ol,
-                                  sigmav = x$sigmav,
-                                  ustar = x$ustar,
-                                  wind_dir = x$wind_dir,
-                                  domain = FFP.domain.ext,
-                                  dx = dx,
-                                  dy = dx,
-                                  r = FFP.R,
-                                  rslayer = 1,
-                                  smooth_data = 1,
-                                  pulse = 0)
-                                
-                                list(result = res, error = NULL)},
-                                
-                                error = function(e) {
-                                  list(result = NULL, 
-                                       error = paste0(unique(x$TIMESTAMP), ": ", gsub("\n", "", as.character(e), fixed = TRUE)))}
-                              )
-                            }, .progress = TRUE)
-          
+        ## FFP main function ##
+        if (do.parallel) {
+
+          if (.Platform$OS.type == "unix") {
+
+            # --- SU LINUX / CLUSTER ---
+            # Use mclapply with the given number of workers
+            library(parallel)
+
+            FFP <- mclapply(FFP.input.list.cur, function(x) {
+              tryCatch({
+                res <- calc_footprint_FFP_climatology(
+                  zm = x$zm, z0 = x$z0, umean = x$umean, h = x$PBL,
+                  ol = x$ol, sigmav = x$sigmav, ustar = x$ustar,
+                  wind_dir = x$wind_dir, domain = FFP.domain.ext,
+                  dx = dx, dy = dx, r = FFP.R, rslayer = 1,
+                  smooth_data = 1, pulse = 0
+                )
+                list(result = res, error = NULL)
+              }, error = function(e) {
+                list(
+                  result = NULL,
+                  error = paste0(unique(x$TIMESTAMP), ": ", gsub("\n", "", as.character(e), fixed = TRUE))
+                )
+              })
+            }, mc.cores = n.workers)
+
+          } else {
+
+            # --- SU WINDOWS ---
+            # Use furrr with multisession, setting workers = n.workers
+            pacman::p_load(furrr, future)
+            plan(multisession, workers = n.workers)
+
+            FFP <- future_map(FFP.input.list.cur, function(x) {
+              tryCatch({
+                res <- calc_footprint_FFP_climatology(
+                  zm = x$zm, z0 = x$z0, umean = x$umean, h = x$PBL,
+                  ol = x$ol, sigmav = x$sigmav, ustar = x$ustar,
+                  wind_dir = x$wind_dir, domain = FFP.domain.ext,
+                  dx = dx, dy = dx, r = FFP.R, rslayer = 1,
+                  smooth_data = 1, pulse = 0
+                )
+                list(result = res, error = NULL)
+              }, error = function(e) {
+                list(
+                  result = NULL,
+                  error = paste0(unique(x$TIMESTAMP), ": ", gsub("\n", "", as.character(e), fixed = TRUE))
+                )
+              })
+            }, .progress = FALSE, .options = furrr_options(seed = TRUE))
+
+          }
+
         } else {
-          
+
           # Function not parallelized
-          FFP <- lapply(FFP.input.list.cur, 
+          FFP <- lapply(FFP.input.list.cur,
                         FUN = function(x) {
                           tryCatch(
                             {res <- calc_footprint_FFP_climatology(
@@ -563,369 +711,379 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                               rslayer = 1,
                               smooth_data = 1,
                               pulse = 0)
-                            
+
                             list(result = res, error = NULL)},
-                            
+
                             error = function(e) {
-                              list(result = NULL, 
+                              list(result = NULL,
                                    error = paste0(unique(x$TIMESTAMP), ": ", gsub("\n", "", as.character(e), fixed = TRUE)))}
                           )
                         }
           )
         }
-        
-        
-        # Split the results # 
+
+
+        # Split the results #
         FFP.ls <- sapply(FFP, "[", "result")
         Error <- unlist(sapply(FFP, "[", "error"), use.names = F)
         rm(FFP)
-        
+
         # Free unused memory
         gc()
-        
+
         # Add error message (if there is any) to log #
         if(!(is.null(Error)))
         {
           cat(error(paste0(Error, '\n')))
-          Log_list <- c(Log_list, Error, '')  
+          Log_list <- c(Log_list, Error, '')
         }
-        
+
         # Names are not necessary
         names(FFP.ls) <- NULL
-        
+
         # Format time. It needs to be always a valid value (no gaps allowed in the final product)
         cur.ts <- unique(format(FFP.input.df.cur$'TIMESTAMP', '%Y%m%d%H%M', tz = "GMT"))
-        
-        ## Extract FFP.R list ## 
+
+        ## Extract FFP.R list ##
         FFP.R.list <- lapply(FFP.ls, function(x) x[['r']])
-        
-        
-        
+
+
         ##
         ## [2.1] FFP QUALITY ASSESSMENT -----
         ##
-        
+
         # Computing error index # Index 1: no FFP matrix
         FFP.err.indx_1 <- which(sapply(FFP.R.list, function(x) ifelse(is.null(x), yes = T, no=F)))
-        
+
         # Index 2: FFP matrix yes, but not the higher FFP R (matrix is thus not clipped)
         FFP.err.indx_2 <- which(sapply(FFP.R.list, function(x) !any(x == max(FFP.R)/100, na.rm = TRUE)))
 
-        # Index 3: FFP matrix yes, 70% isopleth no 
+        # Index 3: FFP matrix yes, 70% isopleth no
         if(any(FFP.R %in% which.FFP.R))  {
-          
+
           FFP.err.indx_3 <- which(sapply(FFP.R.list, function(x) !any(x == which.FFP.R/100, na.rm = TRUE)))
-          
-        } else  {   # If none is selected (unrealistic), flag if multiple isopleths are missing # 
-          
+
+        } else  {   # If none is selected (unrealistic), flag if multiple isopleths are missing #
+
           FFP.err.indx_3 <- which(sapply(FFP.R.list, function(x) sum(is.na(x)) > 1))
-          
+
         }
-        
+
         # Flag 4 # If the FFP derives from a gapfilling approach #
         if(MDS.indices) {
-          
-          # Check when the climatology-average is calculated # 
+
+          # Check when the climatology-average is calculated #
           FFP.err.indx_4=which(sapply(FFP.input.df.cur$MDS_Idx, function(x) !is.null(x)))
-          
+
         }
-        
-        # Re-create the full QC modifying 1, 2, 3 and eventually 4  
+
+        # Re-create the full QC modifying 1, 2, 3 and eventually 4
         QC <- rep(0, length(FFP.ls))
 
-        # The most permissive first # 
+        # The most permissive first #
         QC[FFP.err.indx_2] <- 2
         QC[FFP.err.indx_3] <- 3
-        
-        # Including the MDS flag # 
+
+        # Including the MDS flag #
         if(MDS.indices) {
-          
+
           QC[FFP.err.indx_4] <- 4
-          
+
         }
 
-        # The most sever last # Valid for both climatology-average and non-climatology #          
+        # The most severe last # Valid for both climatology-average and non-climatology #
         QC[FFP.err.indx_1] <- 1
-        
-        
-        # Error messages handling # 
-        for(i in seq_along(QC)) {  
+
+
+        # Error messages handling #
+        for(i in seq_along(QC)) {
           if(QC[i]==1) {
-            
+
             # Print #
             cat(warn(paste0(space, '[!] ', bold(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT")), ': ',
                             'according to the model requirements, FFP was not computed', '\n')))
-            
+
             # Log #
-            Log_list <- c(Log_list,  
-                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ', 
+            Log_list <- c(Log_list,
+                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ',
                                  'according to the model requirements, FFP was not computed'))
-            
+
           } else if(QC[i]==2) {
-            
+
             # Print #
-            cat(warn(paste0(space, '[!] ', bold(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT")), ': ', 
-                            'according to the model requirements, ', FFP.R[which.max(FFP.R)], 
+            cat(warn(paste0(space, '[!] ', bold(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT")), ': ',
+                            'according to the model requirements, ', FFP.R[which.max(FFP.R)],
                             '% isoline was not computed', '\n')))
-            
+
             # Log #
-            Log_list <- c(Log_list,  
-                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ', 
-                                 'according to the model requirements, ', FFP.R[which.max(FFP.R)], 
+            Log_list <- c(Log_list,
+                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ',
+                                 'according to the model requirements, ', FFP.R[which.max(FFP.R)],
                                  '% isoline was not computed'))
-            
+
           } else if(QC[i]==3) {
-            
+
             # Print #
-            cat(warn(paste0(space, '[!] ', bold(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT")), ': ', 
-                            'according to the model requirements, ', 
-                            paste0(FFP.R[which(is.na(FFP.R.list[[i]]))], '% '), 
+            cat(warn(paste0(space, '[!] ', bold(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT")), ': ',
+                            'according to the model requirements, ',
+                            paste0(FFP.R[which(is.na(FFP.R.list[[i]]))], '% '),
                             'isoline was not computed', '\n')), sep = "")
-            
+
             # Log #
-            Log_list <- c(Log_list, 
-                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ', 
-                                 'according to the model requirements, ', paste0(FFP.R[which(is.na(FFP.R.list[[i]]))], '% '), 
-                                 'isoline was not computed')) 
+            Log_list <- c(Log_list,
+                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ',
+                                 'according to the model requirements, ', paste0(FFP.R[which(is.na(FFP.R.list[[i]]))], '% '),
+                                 'isoline was not computed'))
           } else if(QC[i]==4) {
-            
+
             # Print #
-            cat(warn(paste0(space, '[!] ', bold(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT")), ': ', 
+            cat(warn(paste0(space, '[!] ', bold(format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT")), ': ',
                             'according to the data filtering, gap-filled FFP is computed', '\n')), sep = "")
-            
+
             # Log #
-            Log_list <- c(Log_list, 
-                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ', 
-                                 'according to the data filtering, gap-filled FFP is computed')) 
+            Log_list <- c(Log_list,
+                          paste0('[!] ', format(FFP.input.df.cur$TIMESTAMP[i], time_format, tz = "GMT"), ': ',
+                                 'according to the data filtering, gap-filled FFP is computed'))
           }
         } # FFP calculation ending....
-        
-        
+
+
         # Check if at least one FFP was computed #
         if(length(FFP.err.indx_1) == length(FFP.ls))  {
-          
-          cat(warn(paste0('\n', space, '[!] ', #bold(current_day_str), ': ', 
+
+          cat(warn(paste0('\n', space, '[!] ', #bold(current_day_str), ': ',
                           'According to the model requirements, no FFP was computed. If specified, the nc file is created anyway')))
-          
+
           # Add message to log
-          Log_list <- c(Log_list, sapply(FFP.err.indx_1, 
-                                         function(x) paste0("[!] ", #current_day_str, ': ', 
-                                                            'According to the model requirements, no FFP was computed')), '')  
-          
-        } else { 
-          
-          # Plot and matrix saving looping over the list elements 
+          Log_list <- c(Log_list, sapply(FFP.err.indx_1,
+                                         function(x) paste0("[!] ", #current_day_str, ': ',
+                                                            'According to the model requirements, no FFP was computed')), '')
+
+        } else {
+
+          # Plot and matrix saving looping over the list elements
           for(i in which(QC %in% c(0, 2, 3, 4))) {
-            
-            # Remove eventual (unrealistic!) negative values # 
+
+            # Remove eventual (unrealistic!) negative values #
             FFP.ls[[i]]$'fclim_2d'[FFP.ls[[i]]$'fclim_2d' < 0] <- 0
-            
+
             if (drop.trivial.srcs) {
-              
+
               # fetch the footprint value at 90% (or the maximum desired) cumulative distribution
               FFP.90trshd <- NULL
               FFP.90trshd <- FFP.ls[[i]]$'fr'[which.max(FFP.R)]
-              
+
               # and remove the FFP values lower that that
               FFP.ls[[i]]$'fclim_2d'[FFP.ls[[i]]$'fclim_2d' < FFP.90trshd] <- NA
-              
+
             }
-            
-            
-            
+
+
             ##
             ## [3] OUTPUT: PLOT -----
             ##
-            
+
             if (save.plot.FFP.mtx) {
-              # # Two‐dimensional footprint with contour lines of R%
-              
+              # # Two-dimensional footprint with contour lines of R%
+
               # Do it once
               if(i == min(which(QC %in% c(0, 2, 3)))) {
-                cat(prog.mes(paste0('\n', bold('[3]'), #bold(current_day_str), ': ', 
+                cat(prog.mes(paste0('\n', bold('[3]'), #bold(current_day_str), ': ',
                                     ' Saving FFP matrix plots ...\n')))
-                
-                # Add message to log 
-                Log_list <- c(Log_list, paste0(current_day_str, ': ', 
+
+                # Add message to log
+                Log_list <- c(Log_list, paste0(current_day_str, ': ',
                                                'FFP matrix plots saved'), '')
               }
-              
+
               # Plots folder #
               FFP.mtx.img.dir <- paste0(FFP.output.dir, '/individual_footprints_plots/')
-              
+
               # Create folder if not exists
               if(!dir.exists(FFP.mtx.img.dir))  {dir.create(FFP.mtx.img.dir)}
-              
-              # Create a dataframe for the plot 
-              DF_grid <- data.frame(X=as.vector(t(FFP.ls[[i]]$'x_2d')) + EC.tower.utm[1], 
-                                    Y=as.vector(t(FFP.ls[[i]]$'y_2d')) + EC.tower.utm[2], 
+
+              # Create a dataframe for the plot
+              DF_grid <- data.frame(X=as.vector(t(FFP.ls[[i]]$'x_2d')) + EC.tower.utm[1],
+                                    Y=as.vector(t(FFP.ls[[i]]$'y_2d')) + EC.tower.utm[2],
                                     Z=as.vector(FFP.ls[[i]]$'fclim_2d'))
-              
-              # Create a dataframe for the isopleths 
+
+              # Create a dataframe for the isopleths
               names(FFP.ls[[i]]$xr) <- FFP.ls[[i]]$r
               names(FFP.ls[[i]]$yr) <- FFP.ls[[i]]$r
-              
+
               DF_iso <- data.frame(stack(FFP.ls[[i]]$xr), stack(FFP.ls[[i]]$yr)['values'])
               DF_iso$values <- DF_iso$values + EC.tower.utm[1]
               DF_iso$values.1 <- DF_iso$values.1 + EC.tower.utm[2]
-              
+
               # Timestamp label and plot name
               if(all(do.full.climatology == F, do.daily.average==F))  {
-                
-                timestamp_label <- paste0('Timestamp: ', FFP.input.df.cur[i, 'TIMESTAMP'], ' GMT')
-                ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, '_', 'FFP2Dplot', 
+
+                timestamp_label <- paste0('Timestamp: ', format(FFP.input.df.cur$TIMESTAMP[i], '%Y-%m-%d %H:%M'), ' (UTC', time_offset_string, ')')
+                ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, '_', 'FFP2Dplot',
                                        format(FFP.input.df.cur$'TIMESTAMP'[i], '%Y%m%d%H%M'), '.jpeg')
-                
+
               } else if(do.full.climatology == T) {
-                
+
                 timestamp_label <- paste0('Timestamp: ', first_day, '-', last_day)
-                ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, "_FFP2Dplot_", "_FFP2D_full_climatology_", 
+                ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, "_FFP2Dplot_full_climatology_",
                                        first_day, '_', last_day, ".jpeg")
-                
+
               } else if(do.daily.average == T) {
-                
+
                 timestamp_label <- paste0('Timestamp: ', current_day_str)
-                ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, "_FFP2Dplot_", "_FFP2D_daily_average_", 
+                ffp.plotname <- paste0(FFP.mtx.img.dir, site.ID, "_FFP2Dplot_daily_average_",
                                        current_day_str, ".jpeg")
-                
+
               }
-              
-              # Plot              
+
+              # Plot
               ggplot(DF_grid)+
                 geom_raster(aes(x = X, y = Y, fill = Z), alpha=0.85)+
                 geom_path(data=DF_iso, aes(x = values, y = values.1, group = ind), color='grey90')+
                 scale_fill_viridis_c(na.value = "transparent", option = 'D')+
                 geom_vline(xintercept = EC.tower.utm[1], color='grey70')+
                 geom_hline(yintercept = EC.tower.utm[2], color='grey70')+
-                annotate(geom = 'point', x=EC.tower.utm[1], y=EC.tower.utm[2], 
+                annotate(geom = 'point', x=EC.tower.utm[1], y=EC.tower.utm[2],
                          shape=21, fill='red', size=2)+
-                labs(title=paste0('Footprint estimation at ', site.ID), subtitle=timestamp_label, 
+                labs(title=paste0('Footprint estimation at ', site.ID), subtitle=timestamp_label,
                      x= 'X (m)', y= 'Y (m)', fill='Density')+
                 # 500 m limit from the tower center #
                 xlim(EC.tower.utm[1]-500, EC.tower.utm[1]+500)+
                 ylim(EC.tower.utm[2]-500, EC.tower.utm[2]+500)+
-                theme(axis.line = element_line(colour = "black", linewidth = 0.1), 
-                      panel.grid = element_blank(), 
+                theme(axis.line = element_line(colour = "black", linewidth = 0.1),
+                      panel.grid = element_blank(),
                       axis.title = element_text(face="bold"),
                       axis.title.x = element_text(margin=margin(0.3,0,0,0, unit="cm")),
                       axis.title.y = element_text(margin=margin(0,0.3,0,0, unit="cm")),
-                      panel.background=element_rect(fill="white", linewidth = 1, color="black"), 
-                      plot.title = element_text(size=14, hjust = 0.5, face='bold'),  
-                      plot.subtitle = element_text(face = "bold"), 
-                      legend.title = element_text(face = "bold"), 
+                      panel.background=element_rect(fill="white", linewidth = 1, color="black"),
+                      plot.title = element_text(size=14, hjust = 0.5, face='bold'),
+                      plot.subtitle = element_text(face = "bold"),
+                      legend.title = element_text(face = "bold"),
                       legend.background = element_rect(colour = 'NA', fill=NA))
-              
+
               # Save the plot
               ggsave(ffp.plotname, width = 23, height = 13, units='cm', dpi = 400)
-              
+
             } # Plot condition ending...
-            
+
           } # Loop over valid matrices ending...
-          
+
           # Add and extra space to the messages
           #cat('\n')
-          
-          
-          
+
+
           ##
           ## [4] OUTPUT: CSV MATRIX -----
           ##
-          
+
           if(!is.null(save.FFP.mtx.as)) {
-            
+
             if (save.FFP.mtx.as == 'csv') {
-              
-              cat(prog.mes(paste0('\n', bold('[4]'), #bold(current_day_str), ': ', 
+
+              cat(prog.mes(paste0('\n', bold('[4]'), #bold(current_day_str), ': ',
                                   ' Saving FFP matrices as csv(s)', '\n')))
-              
-              # Add message to log 
-              Log_list <- c(Log_list, paste0('\n', current_day_str, ': ', 
+
+              # Add message to log
+              Log_list <- c(Log_list, paste0('\n', current_day_str, ': ',
                                              'FFP matrices saved as csv(s)'), '')
-              
+
               # Create folder if not exist
-              FFP.mtx.dir <- paste0(FFP.output.dir, '/individual_footprints_matrices/'); dir.create(FFP.mtx.dir)
-              
-              mapply(function(x, y) fwrite(x[['fclim_2d']], 
-                                           paste0(FFP.mtx.dir, site.ID, '_FFP2Dmtx_', y, '.csv'), 
-                                           quote = F, row.names = F, col.names = F, verbose = FALSE), 
-                     FFP.ls[-FFP.err.indx_1],  format(FFP.input.df.cur[-FFP.err.indx_1 ,'TIMESTAMP'], '%Y%m%d%H%M')) 
-              
+              FFP.mtx.dir <- paste0(FFP.output.dir, '/individual_footprints_matrices/'); if(!dir.exists(FFP.mtx.dir)) {dir.create(FFP.mtx.dir)}
+
+              # Computed matrices only (QC 1: not computed, no file) # File names as the plots: half-hour, daily average or full climatology
+              ok.mtx <- setdiff(seq_along(FFP.ls), FFP.err.indx_1)
+
+              if(all(do.full.climatology == F, do.daily.average == F)) {
+                mtx.names <- paste0(site.ID, '_FFP2Dmtx_', format(FFP.input.df.cur$TIMESTAMP[ok.mtx], '%Y%m%d%H%M'), '.csv')
+              } else if(do.full.climatology == T) {
+                mtx.names <- paste0(site.ID, '_FFP2Dmtx_full_climatology_', first_day, '_', last_day, '.csv')
+              } else if(do.daily.average == T) {
+                mtx.names <- paste0(site.ID, '_FFP2Dmtx_daily_average_', current_day_str, '.csv')
+              }
+
+              if(length(ok.mtx) > 0) {
+                invisible(mapply(function(x, y) fwrite(as.data.frame(x[['fclim_2d']]), paste0(FFP.mtx.dir, y),
+                                                       quote = F, row.names = F, col.names = F, verbose = FALSE),
+                                 FFP.ls[ok.mtx], mtx.names))
+              }
+
             }
-            
+
           }
-          
+
         } # Condition if at least one FFP is computed and remaining savings ending...
-          
+
         if(is.null(save.FFP.mtx.as)) {
-          
+
           cat(warn(paste0('\n', space,  '[!] No FFP output matrices are saved')))
-          
+
           # Save output to log
           Log_list <- c(Log_list, paste0('No FFP output matrices are saved'))
-          
-          
-          
+
+
           ##
           ## [5] OUTPUT: GEOTIFF -----
           ##
-          
+
         } else if (save.FFP.mtx.as == 'gtiff') {
-          
-          # Write the raster in a GTiff format # 
+
+          # Write the raster in a GTiff format #
           cat(prog.mes(paste0('\n', bold('[5]'), ' Saving the FFP array as multiband GeoTiff')))
-          
-          # Compute the FFP full Extent # 
+
+          # Compute the FFP full Extent #
           FFP.Xdim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx)
-          FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx) 
-          
+          FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx)
+
           # Adding a dummy NA grid for NULL elements #
           for(i in FFP.err.indx_1) {
             FFP.ls[[i]]$fclim_2d <- array(data = NA, dim = c(length(FFP.Xdim), length(FFP.Ydim)))
           }
-          
+
           FFP.lon <- FFP.Xdim + EC.tower.utm[1]
           FFP.lat <- FFP.Ydim + EC.tower.utm[2]
-          
+
           # Extract the temporal domain
           Time <- as.character(format(unique(FFP.input.df.cur$'TIMESTAMP'), time_format))
-          
-          # Build the raster grid # 
+
+          # Build the raster grid #
           if (any(QC==0)){
-          
+
           # Build the lat/lon grid
-          FFP.grid <- data.frame(X=as.vector(t(FFP.ls[QC==0][[1]]$'x_2d')) + EC.tower.utm[1], 
+          FFP.grid <- data.frame(X=as.vector(t(FFP.ls[QC==0][[1]]$'x_2d')) + EC.tower.utm[1],
                                  Y=as.vector(t(FFP.ls[QC==0][[1]]$'y_2d')) + EC.tower.utm[2])
-          
+
           } else { # If no matrix exist use the extent and resolution parameters
-            
+
             FFP.grid <- data.frame(X = rep(FFP.lon, ((FFP.domain*2)/dx)+1),
                                    Y = as.vector(sapply(FFP.lat, rep, ((FFP.domain*2)/dx)+1)))
-          } 
-          
-          # List of FFP matrices # 
+          }
+
+          # List of FFP matrices #
           FFP.mtx <- lapply(FFP.ls, function(x) x[['fclim_2d']])
+
+          # Fill value of the GeoTIFF # Defined in any case, also when no FFP is computed
+          fillvalue <- 65535 # Automatically set by terra #
 
           # Calculate scale and offset factors only if at least one not-NA matrix is returned
           if(any(QC != 1)) {
-            
+
             # Global minimum
             min_val <- Reduce(min, lapply(FFP.mtx, function(mat) min(mat, na.rm=TRUE)))
             # Global maximum
             max_val <- Reduce(max, lapply(FFP.mtx, function(mat) max(mat, na.rm=TRUE)))
             # Compute the range
             range.FFP <- c(min_val, max_val)
-            
+
             # Define int16 range
             type_min <- 0
             type_max <- 65534
-            fillvalue <- 65535 # Automatically set by terra #
-            
+
             # Compute scale factor #
             scale.factor <- (range.FFP[2]-range.FFP[1])/(type_max - type_min)
-            
+
             # Compute offset #
             add.offset <- range.FFP[1]-scale.factor*type_min
-            
+
             # Create a named vector #
             scale.offset <- c(sf = scale.factor, ofst = add.offset)
 
@@ -934,60 +1092,63 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                tmp <- as.integer(round((x - scale.offset['ofst']) / scale.offset['sf']))
                tmp[tmp < type_min] <- type_min
                tmp[tmp > type_max] <- type_max
-            
+
                tmp })
 
             # r_list <- lapply(FFP.mtx, function(x) {
             #    tmp <- rast(cbind(FFP.grid, as.vector(x)), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))
             #    tmp })
-                        
+
             # Free unused memory
             rm(FFP.mtx)
             rm(FFP.ls)
             gc()
-            
-            # Rasters list # 
+
+            # Rasters list #
             r_list <- lapply(FFP.mtx.scaled, function(x) {
               tmp <- rast(cbind(FFP.grid, as.vector(x)), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))
               tmp })
-            
-                        
+
+
             # Clean the scaled matrix #
             rm(FFP.mtx.scaled)
             gc()
-            
-            # Create the multiband raster # 
-            
+
+            # Create the multiband raster #
+
             r <- rast(r_list)
-            
-            # Add raster names # 
+
+            # Add raster names #
             names(r) <- paste0("FFP_", 1:length(r_list))
-            
-            # Add scale and factor # Due to rounding, values can't be exactly the same 
+
+            # Add scale and factor # Due to rounding, values can't be exactly the same
             scoff(r) <- cbind(scale.offset['sf'], scale.offset['ofst'])
-            
+
           } else {
-            
-            # Bind matrix and coordinates - build the spatraster
-            r <- rast(cbind(FFP.grid, FFP.mtx), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))
-            
+
+            # Bind matrix and coordinates - build the spatraster # One layer per timestamp, as in the scaled case
+            r <- rast(lapply(FFP.mtx, function(x) rast(cbind(FFP.grid, as.vector(x)), type = "xyz", crs=crs(paste0('EPSG:', EPSG.code)))))
+
+            # Add raster names #
+            names(r) <- paste0("FFP_", 1:length(FFP.mtx))
+
           }
-          
-          # Frequency variable # 
+
+          # Frequency variable #
           if(do.full.climatology) {
-            
+
             frequency.char <- "full average"
-            
+
           } else if(do.daily.average) {
-            
+
             frequency.char <- "daily average"
-            
+
           } else {
-            
+
             frequency.char <- "30min"
-            
+
           }
-          
+
           ## Add raster metadata, in any case ##
           #metags(r) <- c(Identifier=paste0("FFP at ", site.ID, " - ", as_date(FFP.input.df.cur$TIMESTAMP)[1]))
           metags(r) <- c(
@@ -996,287 +1157,285 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
             CONVENTIONS="CF-1.9",
             CREATION_DATE=as.character(Sys.Date()),
             CONTRIBUTORS="ICOS Carbon Portal",
-            CREATOR=paste0("Luca Di Fiore, ICOS ETC, CMCC Viterbo, orcid: 0000-0002-5698-4235", "; ", 
+            CREATOR=paste0("Luca Di Fiore, ICOS ETC, CMCC Viterbo, orcid: 0000-0002-5698-4235", "; ",
                            "Giacomo Nicolini, ICOS ETC, CMCC Viterbo, orcid: 0000-0002-9800-3351", "; ",
                            "Dario Papale, ICOS ETC, UNITUS, orcid: 0000-0001-5170-8648"),
             FREQUENCY=frequency.char,
             GEOSPATIAL_LAT_RESOLUTION=paste0(dx, " m"),
             GEOSPATIAL_LON_RESOLUTION=paste0(dx, " m"),
-            INSTITUTION=paste0("CMCC Foundation - Euro-Mediterranean Center on Climate Change, IAFES Division, Viterbo, Italy", "; ", 
+            INSTITUTION=paste0("CMCC Foundation - Euro-Mediterranean Center on Climate Change, IAFES Division, Viterbo, Italy", "; ",
                                "Department for Innovation in Biological, Agro-Food and Forest Systems (DIBAF), University of Tuscia, Viterbo, Italy"),
             KEYWORDS="Flux footprints, Eddy covariance",
             LICENSE="CC-BY 4.0",
             PRODUCT_VERSION="1.0",
             #PROJECT="Integrated Carbon Observation System",
-            REFERENCES=paste0("FFP model: Kljun et al. (2015), doi:10.5194/gmd‐8‐3695‐2015" ,"; ",
+            REFERENCES=paste0("FFP model: Kljun et al. (2015), doi:10.5194/gmd-8-3695-2015" ,"; ",
                               "Source code for generating the NetCDF file: https://github.com/icos-etc/FFP-utils"),
             #HISTORY=paste0("ICOS Ecosystem Thematic Centre", date(), sep=", "),
             SOURCE=paste0("PID code of input ICOS eddy covariance data: ", PID),
             SUBJECTS="Flux footprints, Eddy covariance",
-            SUMMARY=paste0("The file contains the footprint estimation and the quality layer of the station ", 
-                           site.ID, " at 30-minute temporal resolution."),
+            SUMMARY=paste0("The file contains the footprint estimation and the quality layer of the station ",
+                           site.ID, " ", summary.res, "."),
             VARIABLES="FFP",
             QC=paste0(QC, collapse =" "))
-          
-          # Create the path if don't exist # 
+
+          # Create the path if don't exist #
           ffp.GTiff.fpath <- paste0(FFP.output.dir, "/GTiff_files/")
           if(!dir.exists(ffp.GTiff.fpath)) {dir.create(ffp.GTiff.fpath)}
-          
-          # GTiff filename and time 
+
+          # GTiff filename and time
           if(all(do.full.climatology == F, do.daily.average==F))  {
-            
+
             ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_", i.day, ".tiff")
-            
-            # Specify the time with the correct time zone 
+
+            # Specify the time with the correct time zone
             time_strings <- format(unique(FFP.input.df.cur$TIMESTAMP), format="%Y-%m-%d %H:%M:%S GMT")
-            
+
             # Define the fuse for R (is NOT ISO)
             fuse_R <- paste0("Etc/GMT", ifelse(time_offset_hours >= 0, "-", "+"), abs(time_offset_hours))
-            
-            # Assign the time and the time zone # 
-            time(r) <- as.POSIXct(time_strings, tz = fuse_R)
-                        
-            
+
+            # Assign the time and the time zone #
+            terra::time(r) <- as.POSIXct(time_strings, tz = fuse_R) # terra:: explicit: zoo (loaded by CPtoFFPinput) has its own time<-
+
+
           } else if(do.full.climatology == T) {
-            
-            ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_", "_FFP2D_full_climatology_", 
+
+            ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_full_climatology_",
                                     first_day, '_', last_day, ".tiff")
-            time(r) <- first_day
-            
+            terra::time(r) <- first_day
+
           } else if(do.daily.average == T) {
-            
-            ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_", "_FFP2D_daily_average_", i.day, ".tiff")
-            time(r) <- as.Date(current_day_str)
-            
+
+            ffp.gtiffname <- paste0(ffp.GTiff.fpath, site.ID, "_FFP2D_daily_average_", i.day, ".tiff")
+            terra::time(r) <- as.Date(current_day_str)
+
           }
-          
+
           # Write the GTiff file #
-          writeRaster(r, filename = ffp.gtiffname, overwrite=T, progress=F, datatype="FLT4S", 
+          writeRaster(r, filename = ffp.gtiffname, overwrite=T, progress=F, datatype="FLT4S",
                       NAflag = as.numeric(fillvalue))
-          
+
           # Save output message to log
-          Log_list <- c(Log_list, '', paste0(#unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d')), ': ', 
+          Log_list <- c(Log_list, '', paste0(#unique(format(FFP.input.df.cur$TIMESTAMP, '%Y-%m-%d')), ': ',
                                              'FFP array saved as multiband GeoTiff'))
-          
+
           cat(prog.mes('\n'))
-          
+
           cat('\n**************************************************************************************')
-          
-          
-          
+
+
           ##
           ## [6] OUTPUT: NETCDF -----
           ##
-          
+
         } else if (save.FFP.mtx.as == 'nc') {
-          
-          
+
+
           # Create and write a projected netCDF file message
-          cat(prog.mes(paste0('\n', bold('[6]'), #bold(current_day_str), ': ', 
+          cat(prog.mes(paste0('\n', bold('[6]'), #bold(current_day_str), ': ',
                               ' Creating and writing the netCDF file')))
-          
+
           ##
           ## [6.1] INPUT LIST PARAMETERS -----
           ##
-          
-          # List to store dimention/attributes inputs
+
+          # List to store dimension/attributes inputs
           FFP.input.list <- list()
-          
-          # Define nc single matrix dimensions 
-          if (any(QC==0)) { # Only the last valid time is considered 
-            
+
+          # Define nc single matrix dimensions
+          if (any(QC==0)) { # Only the last valid time is considered
+
             # store the X,Y dimensions of the FFP arrays (used for nc file dimension and variables)
-            FFP.Xdim <- FFP.ls[which(QC == 0)][[1]]$'x_2d'[1, ]  # take the first row of x_2d, 
+            FFP.Xdim <- FFP.ls[which(QC == 0)][[1]]$'x_2d'[1, ]  # take the first row of x_2d,
             FFP.Ydim <- FFP.ls[which(QC == 0)][[1]]$'y_2d'[, 1]  # take the first column of y_2d
-            
+
           } else { # If no matrix exist use the extent and resolution parameters
-            
+
             # store the X,Y dimensions of the FFP arrays (used for nc file dimension and variables)
             FFP.Xdim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx)
-            FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx) 
-            
-          } 
-          
+            FFP.Ydim <- seq(min(FFP.domain.ext), max(FFP.domain.ext), dx)
+
+          }
+
           # Store the UTM coordinates of the FFP arrays (used for nc file dimension and variables)
           FFP.lon <- FFP.Xdim + EC.tower.utm[1]
           FFP.lat <- FFP.Ydim + EC.tower.utm[2]
-          
+
           # Create an index of the correct isopleth calculation
           Idx_Iso <- which(sapply(FFP.R.list, function(x) any(x %in% (which.FFP.R/100))))
           Idx_NoIso <- which(sapply(FFP.R.list, function(x) !any(x %in% (which.FFP.R/100))))
-          
-          # Choose of the right isopleth 
+
+          # Choose of the right isopleth
           Pos <- which(sort(FFP.R) %in% which.FFP.R)
-          
-          # Where the isopleth is not correctly calculated, add 3 zero vertices coords # 
-          # Add 3 vertices where the chosen isopleth is NA (for tower center) directly in XR and YR 
-          
+
+          # Where the isopleth is not correctly calculated, add 3 zero vertices coords #
+          # Add 3 vertices where the chosen isopleth is NA (for tower center) directly in XR and YR
+
           if(length(FFP.ls[Idx_NoIso]) > 0)  {
-            
+
             for(i in Idx_NoIso) #FFP.sf[FFP.sf$Area==0, 'Index']
             {
               # Three nodes with zero coords in the second sublist
               FFP.ls[[i]]$xr[[Pos]] <- rep(0, 3)
               FFP.ls[[i]]$yr[[Pos]] <- rep(0, 3)
-            
-              # If noISO is 48: zero coords to all #   
+
+              # If noISO is 48: zero coords to all #
             }
-          } 
-          
-          
-          # When no FFP matrix is calculated at all, zero coords to all # 
+          }
+
+
+          # When no FFP matrix is calculated at all, zero coords to all #
           if(length(FFP.ls) == length(FFP.err.indx_1))  {
-            
+
             for(i in 1:length(FFP.ls)) #FFP.sf[FFP.sf$Area==0, 'Index']
             {
               # Three nodes with zero coords in the second sublist
               FFP.ls[[i]]$xr[[Pos]] <- rep(0, 3)
               FFP.ls[[i]]$yr[[Pos]] <- rep(0, 3)
-              
+
             }
           }
-          
-          
-          
+
+
           ##
           ## [6.2] FFP ISOPLETH PARAMETERS -----
           ##
-          
-          # Define parameters linked to isopleths 
+
+          # Define parameters linked to isopleths
           if(return.isopleth) {
-            
-            cat(prog.mes(paste0('\n', bold('[6.2]'), 
-                                ' Processing the FFP output to store the ', which.FFP.R, 
+
+            cat(prog.mes(paste0('\n', bold('[6.2]'),
+                                ' Processing the FFP output to store the ', which.FFP.R,
                                 '% isopleth as polygon')))
-            
-            # Area calculation on ST_Polygons # 
+
+            # Area calculation on ST_Polygons #
             FFP.sf <- data.frame(id=NULL, type=NULL, Area=NULL, Area_TOT=NULL, Index=NULL, nodes=NULL)
-            
+
             if(length(Pos)==0)  {
               stop('FFP isopleth chosen to be returned is not in the isopleths list of the FFP function')
             }
-            
+
             # Create a list of vectors with the coordinates in the right order according to the hole vector #
             nodes_x_tot <- c()
             nodes_y_tot <- c()
-            
-            
+
+
             for(i in 1:length(FFP.ls)) {
-                
-                DF <- data.frame(Lon=FFP.ls[[i]]$xr[[Pos]] + EC.tower.utm[1], 
+
+                DF <- data.frame(Lon=FFP.ls[[i]]$xr[[Pos]] + EC.tower.utm[1],
                                  Lat=FFP.ls[[i]]$yr[[Pos]] + EC.tower.utm[2])
-                
-                # Group index generating # 
-                pol_idx <- cumsum(is.na(DF$Lon))[!is.na(DF$Lon)] # IMPORTANT # Remove the NA 
-                # Calculate the node sum of each type #  
+
+                # Group index generating #
+                pol_idx <- cumsum(is.na(DF$Lon))[!is.na(DF$Lon)] # IMPORTANT # Remove the NA
+                # Calculate the node sum of each type #
                 pol_idx_nodes=as.vector(table(pol_idx))
-                
-                # Associate coords for regular and holes polygons # 
+
+                # Associate coords for regular and holes polygons #
                 DF_idx=cbind(na.omit(DF), pol_idx)
-                
+
                 # Split the polygons #
                 pol_list <- split(DF_idx, DF_idx$pol_idx)
-    
-                # Convex hull by polygons # 
-                pol <- pol_list %>% map(function(x) 
+
+                # Convex hull by polygons #
+                pol <- pol_list %>% map(function(x)
                                           st_convex_hull(st_union(st_as_sf(na.omit(x), coords=c('Lon', 'Lat'), crs=EPSG.code))))
                 pol_union <- do.call(c, pol)
-                
+
                 # Relationship matrix among all the polygons
                 relation_matrix <- st_contains(pol_union, pol_union, sparse = FALSE)
-                
+
                 # Remove the diagonal
                 diag(relation_matrix) <- FALSE
-                
-                # If at least one TRUE, that poligon is contained in something else # 
+
+                # If at least one TRUE, that polygon is contained in something else #
                 is_hole <- colSums(relation_matrix) > 0
 
-                
+
                 nodes_x_list <- c()
                 nodes_y_list <- c()
-                
+
                 for(j in seq_along(pol_list)) {
-                  
-                  # Estraiamo i vettori grezzi dal singolo elemento della lista
+
+                  # Extract the raw vectors from the single element of the list
                   lon_raw <- pol_list[[j]]$Lon
                   lat_raw <- pol_list[[j]]$Lat
-                  
-                  # If the polygon is standard --> REV # Otherwise no # 
+
+                  # If the polygon is standard --> REV # Otherwise no #
                   if(!is_hole[j]) {
-                    
+
                     nodes_x_list[[j]] <- rev(lon_raw)
                     nodes_y_list[[j]] <- rev(lat_raw)
-                    
+
                   } else {
-                    
+
                     nodes_x_list[[j]] <- lon_raw
                     nodes_y_list[[j]] <- lat_raw
-                    
+
                   }
                 }
-                
+
                 # AREA calculation #
-                
+
                 pol_sf <- st_sf(
-                  id = names(pol), 
+                  id = names(pol),
                   type = ifelse(is_hole, "hole", "standard"),
                   nodes=pol_idx_nodes,
                   geometry = pol_union
                 )
 
                 pol_sf$Area=as.vector(st_area(pol_sf$geometry))
-                
-                # One value for each half-hour. Join full polygons and holes # 
+
+                # One value for each half-hour. Join full polygons and holes #
                 pol_sf$Area_TOT=sum(ifelse(pol_sf$type == "standard", pol_sf$Area, -pol_sf$Area))
                 pol_sf=st_drop_geometry(pol_sf)
-                
-                
+
+
                 # Get the polygon index #
                 pol_sf$Index <- i
-                
-                # Join the i half-hour with the others # 
+
+                # Join the i half-hour with the others #
                 FFP.sf <- rbind(FFP.sf, pol_sf)
-                
-                # Bind the coords vectors reversed # 
+
+                # Bind the coords vectors reversed #
                 nodes_x_tot=c(nodes_x_tot, unlist(nodes_x_list))
                 nodes_y_tot=c(nodes_y_tot, unlist(nodes_y_list))
-                
+
             }
-            
-            # Complex polygons warnings # 
+
+            # Complex polygons warnings #
             for(i in unique(FFP.sf$Index))  {
-              
+
               tmp <- FFP.sf[FFP.sf$Index==i, ]
-              
-              if(nrow(tmp) > 1) {  # two polygons # 
-                
-                if(any(tmp$type %in% "hole")) { # Any hole? # 
-                  
+
+              if(nrow(tmp) > 1) {  # two polygons #
+
+                if(any(tmp$type %in% "hole")) { # Any hole? #
+
                   cat(warn(paste0('[!] ', bold(unique(FFP.input.df.cur$TIMESTAMP[tmp$Index])), ': ',
                                   which.FFP.R, '% isopleth has a hole', '\n')))
 
                   Log_list <- c(Log_list, '',
                                 paste0('[!] ', unique(FFP.input.df.cur$TIMESTAMP[tmp$Index]), ': ',
                                        which.FFP.R, '% isopleth has a hole'), '')
-                  
+
                 } else  {  # Two distinct polygons #
-                  
+
                   cat(warn(paste0('[!] ', bold(unique(FFP.input.df.cur$TIMESTAMP[tmp$Index])), ': ',
                                   which.FFP.R, '% isopleth has multiple sub-polygons', '\n')))
-                  
+
                   Log_list <- c(Log_list, '',
                                 paste0('[!] ', unique(FFP.input.df.cur$TIMESTAMP[tmp$Index]), ': ',
                                        which.FFP.R, '% isopleth has multiple sub-polygons'), '')
                 }
               }
             }
-            
+
             ## Input list definition (for dimensions and attributes)
             # Adding variables to the list
             FFP.input.list[['polygon_index']] <- unique(FFP.sf$Index)
-            # Add the area # 
+            # Add the area #
             FFP.input.list[['polygon_area']] <- unique(FFP.sf[c("Area_TOT", "Index")])[['Area_TOT']]
-            
+
             # Insert time variable and char numbers for the date field in the polygon attribute table
             if(all(do.full.climatology == F, do.daily.average==F))  {
 
@@ -1284,253 +1443,253 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
               #FFP.input.list[['char_length']] <- nchar(FFP.input.list$time[1])
 
             } else if(do.full.climatology == T) {
-              
+
               FFP.input.list[['time']] <- as.numeric(format(first_day, "%Y%m%d"))
               #FFP.input.list[['time']] <- as.character(paste0(first_day , '_', last_day))
               #FFP.input.list[['char_length']] <- nchar(FFP.input.list$time[1])
-              
+
             } else if(do.daily.average == T) {
-              
+
               FFP.input.list[['time']] <- as.numeric(format(current_day, "%Y%m%d"))
               #FFP.input.list[['char_length']] <- nchar(FFP.input.list$time[1])
-              
+
             }
-            
-            # Selection of the chosen isoplete and remove the  NAs #
+
+            # Selection of the chosen isopleth and remove the NAs #
             FFP.iso <- lapply(FFP.ls, FUN=function(x) na.omit(x$xr[[Pos]]))
-            
-            # FFP.input.list build # 
-            # Info collection # 
-            
+
+            # FFP.input.list build #
+            # Info collection #
+
             # Real polygons (even zero ones) contained in the input data
             FFP.input.list[['polygon_number']] <- length(FFP.iso) # if half-hours, always 48
-            
+
             # Total nodes for each obs. feature (polygon + eventual holes or parts)
-            FFP.input.list[['nodes_number_polygon']] <- lengths(FFP.iso) 
-            
-            # Nodes for each single element # 
+            FFP.input.list[['nodes_number_polygon']] <- lengths(FFP.iso)
+
+            # Nodes for each single element #
             FFP.input.list[['part_node_count']] <- FFP.sf$nodes
-            
-            # Add part number # 
+
+            # Add part number #
             FFP.input.list[['part_number']] <- length(FFP.input.list$part_node_count)
-            
+
             # Holes identifier (0: standard, 1: hole) #
             FFP.input.list[['interior_ring']] <- ifelse(FFP.sf$type=="standard", yes=0, no=1)
-            
-            # Total number of nodes # 
-            FFP.input.list[['nodes_total']] <- sum(lengths(FFP.iso)) 
-            
+
+            # Total number of nodes #
+            FFP.input.list[['nodes_total']] <- sum(lengths(FFP.iso))
+
             # Plain coordinate vectors (adjusted for the holes, which are reversed) #
             FFP.input.list[['nodes_x']] <- nodes_x_tot
             FFP.input.list[['nodes_y']] <- nodes_y_tot
-            
-            # Remove the sf object 
+
+            # Remove the sf object
             #rm(FFP.sf)
-            
+
           } # Isopleth input phase ....... ENDING
-          
-          # Populating the FFP input list with additional information #  
+
+          # Populating the FFP input list with additional information #
           # Retrieving QC flag and adding it to the list
           FFP.input.list[['QC_Flag']] <- QC
-          
-          # Add EC tower coords to the input list 
+
+          # Add EC tower coords to the input list
           FFP.input.list[['EC_Tower_x']] <- EC.tower.utm[1]
           FFP.input.list[['EC_Tower_y']] <- EC.tower.utm[2]
-          
-          
-          
+
+
           ##
           ## [6.3] FFP BOX COORDINATES -----
           ##
-          
-          cat(prog.mes(paste0('\n', bold('[6.3]'), 
+
+          cat(prog.mes(paste0('\n', bold('[6.3]'),
                               ' Adding bounding box vertices coordinates in Lat/Lon')))
-          
-          # BB (buonding box) creation #
+
+          # BB (bounding box) creation #
           x.min <- min(FFP.lon)# - (dx / 2)
           x.max <- max(FFP.lon)# + (dx / 2)
           y.min <- min(FFP.lat)# - (dx / 2)
           y.max <- max(FFP.lat)# + (dx / 2)
-          
-          # 4 anti-clockwise vertices starting from bottom left # 
+
+          # 4 anti-clockwise vertices starting from bottom left #
           X_vertices <- c(x.min, x.max, x.max, x.min, x.min)
           Y_vertices <- c(y.min, y.min, y.max, y.max, y.min)
-          
-          # UTM spatial obkect
+
+          # UTM spatial object
           BB_matrix <- cbind(X_vertices, Y_vertices)
           BB_polygon  <- st_sfc(st_polygon(list(BB_matrix)), crs=EPSG.code)
-          
-          # Project the polygon to WGS84 # 
+
+          # Project the polygon to WGS84 #
           BB_polygon_WGS84 <- st_transform(BB_polygon, crs = 4326)
-          
+
           # BB coordinates # BL - TL - TR - BR #
           BB_coords_WGS84 <- unique(as.data.frame(st_coordinates(BB_polygon_WGS84)[, c("X", "Y")]))
-          
-          # Convert to a plain vector # 
+
+          # Convert to a plain vector #
           BB_coords_WGS84_X <- unlist(as.vector(BB_coords_WGS84)[1], use.names = F)
           BB_coords_WGS84_Y <- unlist(as.vector(BB_coords_WGS84)[2], use.names = F)
 
           # Add the coordinates to the input list #
           FFP.input.list[['BB_Coords_X']] <- BB_coords_WGS84_X
           FFP.input.list[['BB_Coords_Y']] <- BB_coords_WGS84_Y
-          
-          
+
+
           ##
           ## [6.4] FFP DATA COMPRESSION -----
           ##
-          
+
           # Adding a dummy NA grid for NULL elements #
           for(i in FFP.err.indx_1)  {
             FFP.ls[[i]]$fclim_2d <- array(data = NA, dim = c(length(FFP.Xdim), length(FFP.Ydim)))
           }
-          
-          # Extract the FFP array and apply the scale-offset factor # 
+
+          # Extract the FFP array and apply the scale-offset factor #
           #FFP.mtx <- lapply(FFP.ls, function(x) x[['fclim_2d']]/sum(x[['fclim_2d']], na.rm = T))
           FFP.mtx <- lapply(FFP.ls, function(x) x[['fclim_2d']])
-          
+
+          # Fill value of the nc file # Defined in any case, also when no FFP is computed
+          fillvalue <- 65535
+
           # Calculate scale and offset factors only if at least one not-NA matrix is returned
           if(any(FFP.input.list[['QC_Flag']]!=1)) {
-            
+
             # Add a scaling factor for the FFP values (to reduce object size)
             # Global minimum
-            min_val <- Reduce(function(a, b) min(a, b, na.rm = TRUE), 
+            min_val <- Reduce(function(a, b) min(a, b, na.rm = TRUE),
                               lapply(FFP.mtx, function(mat) {
                                 if (all(is.na(mat))) return(NULL) # Skip NA matrices
                                 min(mat, na.rm = TRUE)}))
-            
+
             # Global maximum
-            max_val <- Reduce(function(a, b) max(a, b, na.rm = TRUE), 
+            max_val <- Reduce(function(a, b) max(a, b, na.rm = TRUE),
                               lapply(FFP.mtx, function(mat) {
                                 if (all(is.na(mat))) return(NULL) # Skip NA matrices
                                 max(mat, na.rm = TRUE)}))
 
             # Compute the range
             range.FFP <- c(min_val, max_val)
-            
-            # Define int16 range and fillvalue
-            type_min <- 0 
+
+            # Define int16 range
+            type_min <- 0
             type_max <- 65534
-            fillvalue <- 65535
-            
+
             # Compute scale factor #
             scale.factor <- (range.FFP[2]-range.FFP[1])/(type_max - type_min)
-            
-            # Compute offset # 
+
+            # Compute offset #
             add.offset <- range.FFP[1]-scale.factor*type_min
-            
-            # Create a named vector # 
+
+            # Create a named vector #
             scale.offset <- c(sf = scale.factor, ofst = add.offset)
-            
+
             # Create an array of FFP matrices, using scale and offset factors
             FFP.array <- array(NA_integer_, dim = c(length(FFP.Xdim), length(FFP.Ydim), length(FFP.mtx)))
             for (i in seq_along(FFP.mtx)) {
               FFP.array[,,i] <- round((FFP.mtx[[i]] - add.offset) / scale.factor)
             }
 
-            # Data clipping # Prevents hidden rounding errors # 
+            # Data clipping # Prevents hidden rounding errors #
             FFP.array[FFP.array < type_min] <- type_min
             FFP.array[FFP.array > type_max] <- type_max
             #FFP.array <- pmin(pmax(FFP.array, type_min), type_max)
-            
+
           } else {
-            
+
             # Extract only the array without calculating scale and offset factors
-            FFP.array <- array(unlist(FFP.mtx, use.names = F), 
+            FFP.array <- array(unlist(FFP.mtx, use.names = F),
                                dim = c(length(FFP.Xdim), length(FFP.Ydim), length(FFP.mtx)))
-            
+
           }
-          
+
           # Free unused memory
           rm(FFP.mtx)
           rm(FFP.ls)
           gc()
-          
+
           # Convert all NA's to the fillvalue used in the creation of nc file
           FFP.array[is.na(FFP.array)] <- fillvalue
-          
-          
+
+
           ##
           ## [6.5] NETCDF BUILD -----
           ##
-          
-          cat(prog.mes(paste0('\n', bold('[6.5]'), 
+
+          cat(prog.mes(paste0('\n', bold('[6.5]'),
                               ' Saving the NetCDF file')))
-          
-          # . * Create the netCDF filename and folder path 
+
+          # . * Create the netCDF filename and folder path
           # path if not exist and file name, set dname
           ffp.ncfpath <- paste0(FFP.output.dir, "/nc_files/")
-          
+
           if(!dir.exists(ffp.ncfpath)) {dir.create(ffp.ncfpath)}
-          
+
           # File ID and name #
           if(all(do.full.climatology == F, do.daily.average==F))  {
             ffp.ncfname <- paste0(ffp.ncfpath, "ICOSETC_", site.ID, "_FFP2D_", i.day, ".nc")
           } else if(do.full.climatology == T) {
-            ffp.ncfname <- paste0(ffp.ncfpath, "ICOSETC_", site.ID, "_FFP2D_full_climatology_", 
+            ffp.ncfname <- paste0(ffp.ncfpath, "ICOSETC_", site.ID, "_FFP2D_full_climatology_",
                                   first_day, '_', last_day, ".nc")
           } else if(do.daily.average == T) {
-            ffp.ncfname <- paste0(ffp.ncfpath, "ICOSETC_", site.ID, "_FFP2D_daily_average_", 
+            ffp.ncfname <- paste0(ffp.ncfpath, "ICOSETC_", site.ID, "_FFP2D_daily_average_",
                                   i.day, ".nc")
           }
 
           ffp.dfname <- "FFP"
-          
-          
-          
+
+
           ## [4.3] ## Definition of netCDF dimensions and variables
-          
+
           # FFP grid dimension definition (x, y, time)
-          FFP_dim_x <- ncdim_def(name='x', 
+          FFP_dim_x <- ncdim_def(name='x',
                                  units='m',
                                  longname="X coordinate of projection",
                                  vals=FFP.lon)
-          
-          FFP_dim_y <- ncdim_def(name='y', 
+
+          FFP_dim_y <- ncdim_def(name='y',
                                  units='m',
                                  longname="Y coordinate of projection",
                                  vals=FFP.lat)
-          
+
           # Set the correct utc zone #
           if(any(do.full.climatology, do.daily.average))  {
-            
-            FFP_dim_time <- ncdim_def(name="time", 
+
+            FFP_dim_time <- ncdim_def(name="time",
                                       units=paste0("seconds since 1970-01-01 00:00:00 ", time_offset_string),
                                       longname=paste0("Time in seconds since 1970-01-01 00:00:00 ", time_offset_string),
-                                      vals=as.integer(as.POSIXct(unique(cur.ts), format='%Y%m%d', tz='GMT')), 
+                                      vals=as.integer(as.POSIXct(unique(cur.ts), format='%Y%m%d', tz='GMT')),
                                       unlim=T, # Time is unlimited (but not for humans!)
                                       calendar="standard")
-            
+
           } else  {
-            
-            FFP_dim_time <- ncdim_def(name="time", 
+
+            FFP_dim_time <- ncdim_def(name="time",
                                       units=paste0("seconds since 1970-01-01 00:00:00 ", time_offset_string),
                                       longname=paste0("Time in seconds since 1970-01-01 00:00:00 ", time_offset_string),
-                                      vals=as.integer(as.POSIXct(unique(cur.ts), format='%Y%m%d%H%M', tz='GMT')), 
+                                      vals=as.integer(as.POSIXct(unique(cur.ts), format='%Y%m%d%H%M', tz='GMT')),
                                       unlim=T, # Time is unlimited (but not for humans!)
                                       calendar="standard")
           }
-          
-          # Dimension (size=2) for the EC tower coordinates 
-          FFP_dim_ECoords <- ncdim_def(name='EC_Coords', 
+
+          # Dimension (size=2) for the EC tower coordinates
+          FFP_dim_ECoords <- ncdim_def(name='EC_Coords',
                                        units='',
                                        longname="Projected (x and y, respectively) coordinates of EC tower",
-                                       vals=1:2, 
+                                       vals=1:2,
                                        create_dimvar=F)
-          
-          # Dimension (size=4) for the BB coordinates 
-          FFP_dim_BBcoords <- ncdim_def(name='BB_Coords', 
+
+          # Dimension (size=4) for the BB coordinates
+          FFP_dim_BBcoords <- ncdim_def(name='BB_Coords',
                                        units='',
                                        longname="WGS84 coordinates (Bottom Left - Bottom Right) of the matrix bounding box",
-                                       vals=1:4, 
+                                       vals=1:4,
                                        create_dimvar=F)
-          
-          # Dimension (size=48) for the QC 
-          FFP_dim_QC <- ncdim_def(name='QC_dim', 
+
+          # Dimension (size=48) for the QC
+          FFP_dim_QC <- ncdim_def(name='QC_dim',
                                   units='',
                                   longname="Quality flag of FFP matrix",
-                                  vals=1:length(FFP.input.list$QC_Flag), 
+                                  vals=1:length(FFP.input.list$QC_Flag),
                                   create_dimvar=F)
-          
+
           # GRID variables
           # FFP grid #
           FFP_mtx30_def <- ncvar_def(name=ffp.dfname,
@@ -1539,10 +1698,10 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                      missval=fillvalue,
                                      longname="Matrix of normalised 2D footprint values",
                                      prec="integer",
-                                     compression=9, 
-                                     chunksizes=c(length(FFP.lon),length(FFP.lat), 1), 
+                                     compression=9,
+                                     chunksizes=c(length(FFP.lon),length(FFP.lat), 1),
                                      shuffle=TRUE)
-          
+
           # CRS #
           FFP_var_proj <- ncvar_def(name="UTM_coordinate_system",
                                     units='m',
@@ -1550,23 +1709,23 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                     missval=NULL,
                                     longname='CRS reference system (Universal Transverse Mercator)',
                                     prec="char")
-          
+
           # Quality flag #
           FFP_var_QC <- ncvar_def(name="quality_flag",
                                   units='1',
-                                  dim=FFP_dim_QC, 
+                                  dim=FFP_dim_QC,
                                   longname="Quality control on footprint calculation",
                                   missval=NULL,
                                   prec="integer")
-          
+
           # EC Tower coordinates
           FFP_var_ECoord <- ncvar_def(name="EC_tower_coordinates",
                                       units="m",
                                       dim=FFP_dim_ECoords,
                                       missval=NULL,
-                                      longname="Eddy covarinace tower coordinates in UTM",
+                                      longname="Eddy covariance tower coordinates in UTM",
                                       prec="float")
-          
+
           # BB coordinates
           FFP_var_BBcoord_X <- ncvar_def(name="BB_coordinates_x",
                                       units="degrees_east",
@@ -1574,64 +1733,64 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                       missval=NULL,
                                       longname="Bounding box coordinates in WGS84",
                                       prec="float")
-          
+
           FFP_var_BBcoord_Y <- ncvar_def(name="BB_coordinates_y",
                                         units="degrees_north",
                                         dim=FFP_dim_BBcoords,
                                         missval=NULL,
                                         longname="Bounding box coordinates in WGS84",
                                         prec="float")
-          
-          # If isopleth should be returned  
-          
+
+          # If isopleth should be returned
+
           if(return.isopleth) {
-            
+
             # nodes # Nodes number
-            FFP_dim_node <- ncdim_def(name='nodes', 
-                                      units='', ## If dimvar F, then units should be empty ## 
+            FFP_dim_node <- ncdim_def(name='nodes',
+                                      units='', ## If dimvar F, then units should be empty ##
                                       longname="Number of nodes",
-                                      vals=1:FFP.input.list$nodes_total, 
+                                      vals=1:FFP.input.list$nodes_total,
                                       create_dimvar=F)
-            
+
             # instance # Number of polygons
-            FFP_dim_inst <- ncdim_def(name='instance', 
+            FFP_dim_inst <- ncdim_def(name='instance',
                                       units='',
                                       longname="Number of polygons",
-                                      vals=1:FFP.input.list$polygon_number, 
+                                      vals=1:FFP.input.list$polygon_number,
                                       create_dimvar=F)
-            
+
             # Part # Total number of parts across all the obs
-            FFP_dim_part <- ncdim_def(name='part', 
-                                      units='', 
+            FFP_dim_part <- ncdim_def(name='part',
+                                      units='',
                                       longname="Total number of geometry parts",
-                                      vals=1:FFP.input.list$part_number, 
-                                      #vals=1:length(FFP.input.list$part_node_count), 
+                                      vals=1:FFP.input.list$part_number,
+                                      #vals=1:length(FFP.input.list$part_node_count),
                                       create_dimvar=F)
-            
+
             # Part node count # Node count for each part
             FFP_var_part_nodes <- ncvar_def(name="part_node_count",
                                             units='1',
-                                            dim=FFP_dim_part, 
+                                            dim=FFP_dim_part,
                                             missval=NULL,
                                             longname='Number of nodes for each polygon part',
                                             prec="integer")
-            
-            # Internal hole indicator 
+
+            # Internal hole indicator
             FFP_var_int_ring <- ncvar_def(name="interior_ring",
                                           units='1',
-                                          dim=FFP_dim_part, 
+                                          dim=FFP_dim_part,
                                           missval=NULL,
                                           longname='Interior ring indicator (0=exterior, 1=interior)',
                                           prec="integer")
-            
-            # n_char # Number of character of each string # DEPRECATED # 
+
+            # n_char # Number of character of each string # DEPRECATED #
             # Maximum dimension equal to the maximum length of a string
-            # FFP_dim_nchar <- ncdim_def(name='n_char', 
+            # FFP_dim_nchar <- ncdim_def(name='n_char',
             #                            units='',
             #                            longname="Length of each time string",
-            #                            vals=1:FFP.input.list$char_length, 
+            #                            vals=1:FFP.input.list$char_length,
             #                            create_dimvar=F)
-            
+
             # Geometry container #
             FFP_var_geomc <- ncvar_def(name="geometry_container",
                                        units='1',
@@ -1639,251 +1798,251 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                                        missval=NULL,
                                        longname='Container of the geometry',
                                        prec="char")
-            
+
             # Nodes count #
             FFP_var_nodes <- ncvar_def(name="nodes_count",
                                        units='1',
-                                       dim=FFP_dim_inst, 
+                                       dim=FFP_dim_inst,
                                        missval=NULL,
                                        longname='Number of nodes for each feature',
                                        prec="integer")
-            
-            # Node coordinates (X, Y) # 
+
+            # Node coordinates (X, Y) #
             FFP_var_nodeX <- ncvar_def(name="nodes_x",
-                                       units='m', 
-                                       dim=FFP_dim_node, 
+                                       units='m',
+                                       dim=FFP_dim_node,
                                        missval=NULL,
                                        longname='All nodes coordinates',
                                        prec="float")
-            
+
             FFP_var_nodeY <- ncvar_def(name="nodes_y",
-                                       units='m', 
-                                       dim=FFP_dim_node, 
+                                       units='m',
+                                       dim=FFP_dim_node,
                                        missval=NULL,
                                        longname='All nodes coordinates',
                                        prec="float")
-            
-            # Time # 
+
+            # Time #
             FFP_var_time <- ncvar_def(name="timestamp_start",
                                       units='1',
                                       dim=FFP_dim_inst,
                                       missval=NULL,
                                       longname='Time of each observation',
                                       prec="double")
-            
-            # Quality flag # 
+
+            # Quality flag #
             FFP_var_QC <- ncvar_def(name="quality_flag",
                                     units='1',
                                     dim=FFP_dim_inst,
                                     longname="Quality control on footprint calculation",
                                     missval=NULL,
                                     prec="integer")
-            
+
             # Polygon Area #
             FFP_var_area <- ncvar_def(name="polygon_area",
                                       units='m2',
-                                      dim=FFP_dim_inst, 
+                                      dim=FFP_dim_inst,
                                       missval=NULL,
                                       longname='Area of the isoplete polygon in squared meters',
                                       prec="float")
-            
-            # polygon ID # 
+
+            # polygon ID #
             FFP_var_id <- ncvar_def(name="polygon_id",
                                     units='1',
-                                    dim=FFP_dim_inst, 
+                                    dim=FFP_dim_inst,
                                     missval=NULL,
                                     longname=paste0('Id of each polygon referred to the ', which.FFP.R, '% isoplete'),
                                     prec="integer")
-            
-            
+
+
             # NC creation if isopleth is desired
-            ffp.ncout <- nc_create(filename=ffp.ncfname, 
-                                   vars=list(FFP_mtx30_def, 
+            ffp.ncout <- nc_create(filename=ffp.ncfname,
+                                   vars=list(FFP_mtx30_def,
                                              FFP_var_id,
                                              FFP_var_time,
-                                             FFP_var_QC, 
-                                             FFP_var_area, 
-                                             FFP_var_geomc, 
-                                             FFP_var_proj, 
-                                             FFP_var_part_nodes, 
+                                             FFP_var_QC,
+                                             FFP_var_area,
+                                             FFP_var_geomc,
+                                             FFP_var_proj,
+                                             FFP_var_part_nodes,
                                              FFP_var_int_ring,
-                                             FFP_var_nodes, 
-                                             FFP_var_nodeX, 
-                                             FFP_var_nodeY, 
-                                             FFP_var_ECoord, 
-                                             FFP_var_BBcoord_X, 
-                                             FFP_var_BBcoord_Y), 
+                                             FFP_var_nodes,
+                                             FFP_var_nodeX,
+                                             FFP_var_nodeY,
+                                             FFP_var_ECoord,
+                                             FFP_var_BBcoord_X,
+                                             FFP_var_BBcoord_Y),
                                    force_v4 = TRUE)
           } else {
-            
+
             # NC creation if isopleth is not desired
             ffp.ncout <- nc_create(filename=ffp.ncfname,
                                    vars=list(FFP_mtx30_def,
-                                             FFP_var_proj, 
+                                             FFP_var_proj,
                                              FFP_var_QC,
-                                             FFP_var_ECoord, 
-                                             FFP_var_BBcoord_X, 
-                                             FFP_var_BBcoord_Y), 
+                                             FFP_var_ECoord,
+                                             FFP_var_BBcoord_X,
+                                             FFP_var_BBcoord_Y),
                                    force_v4=TRUE)
-            
+
           }
-          
+
           #nc_close(ffp.ncout)
-          
-          
+
+
           ## [4.4] ## Store variables in the NC file
-          
+
           # FFP_mtx30_def
-          ncvar_put(nc=ffp.ncout, varid=FFP_mtx30_def, 
+          ncvar_put(nc=ffp.ncout, varid=FFP_mtx30_def,
                     vals=FFP.array) ## Array
-          
+
           # FFP_var_ECoord
-          ncvar_put(nc=ffp.ncout, varid=FFP_var_ECoord, 
+          ncvar_put(nc=ffp.ncout, varid=FFP_var_ECoord,
                     vals=c(FFP.input.list$EC_Tower_x, FFP.input.list$EC_Tower_y)) ## EC coords
-          
+
           # FFP_var_BBcoord_X
-          ncvar_put(nc=ffp.ncout, varid=FFP_var_BBcoord_X, 
+          ncvar_put(nc=ffp.ncout, varid=FFP_var_BBcoord_X,
                     vals=FFP.input.list$BB_Coords_X) ## BB coords X
-          
+
           # FFP_var_BBcoord_Y
-          ncvar_put(nc=ffp.ncout, varid=FFP_var_BBcoord_Y, 
+          ncvar_put(nc=ffp.ncout, varid=FFP_var_BBcoord_Y,
                     vals=FFP.input.list$BB_Coords_Y) ## BB coords Y
-          
-          # FFP_var_QC 
-          ncvar_put(nc=ffp.ncout, varid=FFP_var_QC, 
+
+          # FFP_var_QC
+          ncvar_put(nc=ffp.ncout, varid=FFP_var_QC,
                     vals=FFP.input.list$QC_Flag) ## Flag
-          
-          
+
+
           # Additional variables related to isopleth
-          if(return.isopleth) {  
-            
-            # FFP_var_id 
+          if(return.isopleth) {
+
+            # FFP_var_id
             ncvar_put(nc=ffp.ncout, varid=FFP_var_id, vals=FFP.input.list$polygon_index) ## Polygon ID
-            
-            # FFP_var_nodes 
+
+            # FFP_var_nodes
             ncvar_put(nc=ffp.ncout, varid=FFP_var_nodes, vals=FFP.input.list$nodes_number_polygon) ## Number of nodes
-            
+
             # FFP_var_nodeX
             ncvar_put(nc=ffp.ncout, varid=FFP_var_nodeX, vals=FFP.input.list$nodes_x) ## Nodes coord x
-            
-            # FFP_var_nodeY 
+
+            # FFP_var_nodeY
             ncvar_put(nc=ffp.ncout, varid=FFP_var_nodeY, vals=FFP.input.list$nodes_y) ## Nodes coord y
-            
+
             # FFP_var_area
             ncvar_put(nc=ffp.ncout, varid=FFP_var_area, vals=FFP.input.list$polygon_area) ## Pol area
-            
-            # FFP_var_time 
+
+            # FFP_var_time
             ncvar_put(nc=ffp.ncout, varid=FFP_var_time, vals=FFP.input.list$time) ## Observation time
-            
+
             # FFP_var_part_nodes
             ncvar_put(nc=ffp.ncout, varid=FFP_var_part_nodes, vals=FFP.input.list$part_node_count) ## Nodes for each part
-            
+
             # FFP_var_int_ring
             ncvar_put(nc=ffp.ncout, varid=FFP_var_int_ring, vals=FFP.input.list$interior_ring) ## Holes tag
-            
+
           }
-          
-          
+
+
           # Grid mapping variable
           eastern_boundary <- UTM.zone * 6 - 180 # eastern boundary of the UTM zone, degrees
           western_boundary <- eastern_boundary - 6       # western boundary of the UTM zone, degrees
           central_meridian <- western_boundary + 3
-          
-          
+
+
           # Grid mapping name
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="grid_mapping_name", 
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="grid_mapping_name",
                     attval='transverse_mercator')
-          
-          # WKT: SPHEROID[“", , , ...]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="semi_major_axis", 
+
+          # WKT: SPHEROID["", , , ...]
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="semi_major_axis",
                     attval=6378137)
-          
-          # WKT: SPHEROID[“", , , ...]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="inverse_flattening", 
+
+          # WKT: SPHEROID["", , , ...]
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="inverse_flattening",
                     attval=298.257223563)
-          
-          # WKT: PRIMEM[“", , ...]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="longitude_of_prime_meridian", 
+
+          # WKT: PRIMEM["", , ...]
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="longitude_of_prime_meridian",
                     attval=0)
-          
-          # WKT: PARAMETER[“Latitude of natural origin”, ]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="latitude_of_projection_origin", 
+
+          # WKT: PARAMETER["Latitude of natural origin", ]
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="latitude_of_projection_origin",
                     attval=0)
-          
-          # WKT: PARAMETER[“Longitude of natural origin”, ]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="longitude_of_central_meridian", 
+
+          # WKT: PARAMETER["Longitude of natural origin", ]
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="longitude_of_central_meridian",
                     attval=central_meridian)
-          
-          # WKT: PARAMETER[“Scale factor at natural origin”, ]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="scale_factor_at_central_meridian", 
+
+          # WKT: PARAMETER["Scale factor at natural origin", ]
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="scale_factor_at_central_meridian",
                     attval=0.9996)
-          
-          # WKT: PARAMETER[“False easting”, ]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="false_easting", 
+
+          # WKT: PARAMETER["False easting", ]
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="false_easting",
                     attval=500000)
-          
-          # WKT: PARAMETER[“False northing”, ]
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="false_northing", 
-                    attval=0)
-          
-          # Add WKT (2) code using sf 
-          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="crs_wkt", 
+
+          # WKT: PARAMETER["False northing", ] # 10000000 m in the southern hemisphere
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="false_northing",
+                    attval=ifelse(latitude < 0, 10000000, 0))
+
+          # Add WKT (2) code using sf
+          ncatt_put(nc=ffp.ncout, varid="UTM_coordinate_system", attname="crs_wkt",
                     attval=sf::st_crs(paste0('epsg:', EPSG.code))[['wkt']])
-          
-          
+
+
           # FFP_mtx30_def
-          ncatt_put(nc=ffp.ncout, varid=ffp.dfname, attname="grid_mapping", 
+          ncatt_put(nc=ffp.ncout, varid=ffp.dfname, attname="grid_mapping",
                     attval='UTM_coordinate_system')
-          ncatt_put(nc=ffp.ncout, varid=ffp.dfname, attname="coordinates", 
+          ncatt_put(nc=ffp.ncout, varid=ffp.dfname, attname="coordinates",
                     attval='x y')
-          
-          
-          # Name of xy 
-          ncatt_put(ffp.ncout, varid="x", attname="standard_name", 
+
+
+          # Name of xy
+          ncatt_put(ffp.ncout, varid="x", attname="standard_name",
                     attval="projection_x_coordinate")
-          ncatt_put(ffp.ncout, varid="y", attname="standard_name", 
+          ncatt_put(ffp.ncout, varid="y", attname="standard_name",
                     attval="projection_y_coordinate")
-          
+
           if(any(FFP.input.list[['QC_Flag']]!=1)) {
             ncatt_put(nc=ffp.ncout, varid=ffp.dfname, attname="scale_factor", prec = "float",
                       attval=scale.offset['sf'])
             ncatt_put(nc=ffp.ncout, varid = ffp.dfname, attname="add_offset", prec = "float",
                       attval=scale.offset['ofst'])
           }
-          
-          
-          # QC # 
+
+
+          # QC #
           ncatt_put(ffp.ncout, varid="quality_flag", attname="standard_name",
                     attval='quality_flag')
-          
-          
-          if(return.isopleth) { 
-            
-            
-            ## Geometry container ## 
-            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="geometry_type", 
+
+
+          if(return.isopleth) {
+
+
+            ## Geometry container ##
+            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="geometry_type",
                       attval='polygon')
-            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="node_count", 
+            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="node_count",
                       attval='nodes_count')
-            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="node_coordinates", 
+            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="node_coordinates",
                       attval='nodes_x nodes_y')
-            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="grid_mapping", 
+            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="grid_mapping",
                       attval='UTM_coordinate_system')
-            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="part_node_count",  
+            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="part_node_count",
                       attval='part_node_count')
-            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="interior_ring",  
+            ncatt_put(nc=ffp.ncout, varid="geometry_container", attname="interior_ring",
                       attval='interior_ring')
-            
-            
-            # QC # 
+
+
+            # QC #
             ncatt_put(ffp.ncout, varid="quality_flag", attname="standard_name",
                       attval='quality_flag')
             ncatt_put(ffp.ncout, varid="quality_flag", attname="grid_mapping",
                       attval='UTM_coordinate_system')
             ncatt_put(ffp.ncout, varid="quality_flag", attname="geometry",
                       attval='geometry_container')
-            
-            
+
+
             # polygon_id # Timeseries identifier
             ncatt_put(ffp.ncout, varid="polygon_id", attname="grid_mapping",
                       attval='UTM_coordinate_system')
@@ -1891,322 +2050,321 @@ doFFP=function(FFP.input.df=NULL,         # input dataframe
                       attval='geometry_container')
             ncatt_put(ffp.ncout, varid="polygon_id", attname="cf_role",
                       attval='timeseries_id')
-            
-            
-            # Name of xy 
-            ncatt_put(ffp.ncout, varid="x", attname="standard_name", 
+
+
+            # Name of xy
+            ncatt_put(ffp.ncout, varid="x", attname="standard_name",
                       attval="projection_x_coordinate")
-            ncatt_put(ffp.ncout, varid="y", attname="standard_name", 
+            ncatt_put(ffp.ncout, varid="y", attname="standard_name",
                       attval="projection_y_coordinate")
-            
-            
-            # FFP_var_time 
+
+
+            # FFP_var_time
             ncatt_put(ffp.ncout, varid = "timestamp_start", attname = "grid_mapping",
                       attval='UTM_coordinate_system')
             ncatt_put(ffp.ncout, varid = "timestamp_start", attname = "geometry",
                       attval='geometry_container')
-            
-            
-            # FFP_var_nodes 
+
+
+            # FFP_var_nodes
             ncatt_put(ffp.ncout, varid="nodes_count", attname="long_name",
                       attval="number of nodes for each polygon feature")
-            
-            
+
+
             # FFP_var_part_nodes
             ncatt_put(ffp.ncout, varid="part_node_count", attname="long_name",
                       attval="number of nodes for each geometry part")
-            
-            
+
+
             # FFP_var_int_ring
             ncatt_put(ffp.ncout, varid="interior_ring", attname="long_name",
                       attval="interior ring indicator")
-            
-            
+
+
             # FFP_var_nodeX
             ncatt_put(ffp.ncout, varid="nodes_x", attname="axis",
                       attval='X')
             ncatt_put(ffp.ncout, varid="nodes_x", attname="units",
                       attval='m')
-            #ncatt_put(ffp.ncout, varid="nodes_x", attname="geometry",  # <-- Come visto prima
+            #ncatt_put(ffp.ncout, varid="nodes_x", attname="geometry",  # <-- As seen above
             #          attval='geometry_container')
-            ncatt_put(ffp.ncout, varid=FFP_var_nodeX, attname="grid_mapping", 
+            ncatt_put(ffp.ncout, varid=FFP_var_nodeX, attname="grid_mapping",
                       attval='UTM_coordinate_system')
-            
-            
+
+
             # FFP_var_nodeY
             ncatt_put(ffp.ncout, varid="nodes_y", attname="axis",
                       attval='Y')
             ncatt_put(ffp.ncout, varid="nodes_y", attname="units",
                       attval='m')
-            #ncatt_put(ffp.ncout, varid="nodes_y", attname="geometry",  # <-- Come visto prima
+            #ncatt_put(ffp.ncout, varid="nodes_y", attname="geometry",  # <-- As seen above
             #          attval='geometry_container')
-            ncatt_put(ffp.ncout, varid=FFP_var_nodeY, attname="grid_mapping", 
+            ncatt_put(ffp.ncout, varid=FFP_var_nodeY, attname="grid_mapping",
                       attval='UTM_coordinate_system')
-            
-            
-            
+
+
             # FFP_var_area
             ncatt_put(ffp.ncout, varid="polygon_area", attname="grid_mapping",
                       attval='UTM_coordinate_system')
             ncatt_put(ffp.ncout, varid="polygon_area", attname="geometry",
                       attval='geometry_container')
-            
-            
+
+
             # Feature type #
-            ncatt_put(ffp.ncout, 0, "featureType", 
+            ncatt_put(ffp.ncout, 0, "featureType",
                       "timeSeries")
-            
-            
+
+
             # THREDDS type #
-            ncatt_put(ffp.ncout, 0, "cdm_data_type", 
+            ncatt_put(ffp.ncout, 0, "cdm_data_type",
                       "Station")
-            
+
           }
-          
-          
+
+
           ## [4.5] ## Store global attributes
-          
+
           # title
           ncatt_put(ffp.ncout, 0, "title", paste0("Footprint estimation at the ", site.ID, " station"))
-          
+
           # Contact
-          ncatt_put(ffp.ncout, 0, "contact", 
+          ncatt_put(ffp.ncout, 0, "contact",
                     paste0("ICOS Ecosystem Thematic Centre, email: info@icos-etc.eu"))
-          
+
           # Contributors
-          ncatt_put(ffp.ncout, 0, "contributors", 
+          ncatt_put(ffp.ncout, 0, "contributors",
                     "ICOS Carbon Portal")
-          
+
           # Conventions
-          ncatt_put(ffp.ncout, 0, "Conventions", 
+          ncatt_put(ffp.ncout, 0, "Conventions",
                     "CF-1.9")
-          
+
           # creation_date
-          ncatt_put(ffp.ncout, 0, "creation_date", 
+          ncatt_put(ffp.ncout, 0, "creation_date",
                     as.character(Sys.Date()))
-          
+
           # creator #
-          ncatt_put(ffp.ncout, 0, "creator", 
-                    paste0("Luca Di Fiore, ICOS ETC, CMCC Viterbo, orcid: 0000-0002-5698-4235", "; ", 
+          ncatt_put(ffp.ncout, 0, "creator",
+                    paste0("Luca Di Fiore, ICOS ETC, CMCC Viterbo, orcid: 0000-0002-5698-4235", "; ",
                            "Giacomo Nicolini, ICOS ETC, CMCC Viterbo, orcid: 0000-0002-9800-3351", "; ",
                            "Dario Papale, ICOS ETC, UNITUS, orcid: 0000-0001-5170-8648"))
-          
-          # crs
-          if(FFP.input.list$EC_Tower_y>0) {
+
+          # crs # Hemisphere from the tower latitude (the UTM northing is always positive)
+          if(latitude > 0) {
             ncatt_put(ffp.ncout, 0, "crs", paste0("WGS84/UTM", UTM.zone, 'N'))
-          } else { 
+          } else {
             ncatt_put(ffp.ncout, 0, "crs", paste0("WGS84/UTM", UTM.zone, 'S'))
           }
-          
-          # Frequency variable # 
+
+          # Frequency variable #
           if(do.full.climatology) {
-            
+
             frequency.char <- "full average"
-            
+
           } else if(do.daily.average) {
-            
+
             frequency.char <- "daily average"
-            
+
           } else {
-            
+
             frequency.char <- "30min"
-            
+
           }
-          
+
           # frequency
-          ncatt_put(ffp.ncout, 0, "frequency", 
+          ncatt_put(ffp.ncout, 0, "frequency",
                     frequency.char)
-          
+
           # geospatial_lat_resolution
-          ncatt_put(ffp.ncout, 0, "geospatial_lat_resolution", 
+          ncatt_put(ffp.ncout, 0, "geospatial_lat_resolution",
                     paste0(dx, " m"))
-          
+
           # geospatial_lon_resolution
-          ncatt_put(ffp.ncout, 0, "geospatial_lon_resolution", 
+          ncatt_put(ffp.ncout, 0, "geospatial_lon_resolution",
                     paste0(dx, " m"))
-          
+
           # geospatial_vertical_resolution
-          #ncatt_put(ffp.ncout, 0, "geospatial_vertical_resolution", 
+          #ncatt_put(ffp.ncout, 0, "geospatial_vertical_resolution",
           #          "To define...")
-          
+
           # institution
-          ncatt_put(ffp.ncout, 0, "institution", 
-                    paste0("CMCC Foundation - Euro-Mediterranean Center on Climate Change, IAFES Division, Viterbo, Italy", "; ", 
+          ncatt_put(ffp.ncout, 0, "institution",
+                    paste0("CMCC Foundation - Euro-Mediterranean Center on Climate Change, IAFES Division, Viterbo, Italy", "; ",
                            "Department for Innovation in Biological, Agro-Food and Forest Systems (DIBAF), University of Tuscia, Viterbo, Italy"))
-                    
+
           # keywords
-          ncatt_put(ffp.ncout, 0, "keywords", 
+          ncatt_put(ffp.ncout, 0, "keywords",
                     "Flux footprints, Eddy covariance")
-          
+
           # license
-          ncatt_put(ffp.ncout, 0, "license", 
+          ncatt_put(ffp.ncout, 0, "license",
                     "CC-BY 4.0")
-          
+
           # product_version
-          ncatt_put(ffp.ncout, 0, "product_version", 
+          ncatt_put(ffp.ncout, 0, "product_version",
                     "1.0")
-          
+
           # references
-          ncatt_put(ffp.ncout, 0, "references", 
-                    paste0("FFP model: Kljun et al. (2015), doi:10.5194/gmd‐8‐3695‐2015" ,"; ",
+          ncatt_put(ffp.ncout, 0, "references",
+                    paste0("FFP model: Kljun et al. (2015), doi:10.5194/gmd-8-3695-2015" ,"; ",
                            "Source code for generating the NetCDF file: https://github.com/icos-etc/FFP-utils"))
-          
+
           # source
-          ncatt_put(ffp.ncout, 0, "source", 
-                    paste0("PID code of input ICOS eddy covariance data: ", PID)) 
-          
-          # Additional metadata ## 
-          ncatt_put(ffp.ncout, 0, "Subjects", 
+          ncatt_put(ffp.ncout, 0, "source",
+                    paste0("PID code of input ICOS eddy covariance data: ", PID))
+
+          # Additional metadata ##
+          ncatt_put(ffp.ncout, 0, "Subjects",
                     "Flux footprints, Eddy covariance")
-          
-          if(return.isopleth) { 
+
+          if(return.isopleth) {
             # summary
-            ncatt_put(ffp.ncout, 0, "summary", 
-                      paste0("The file contains the footprint estimation and the quality layer of the station ", 
-                             site.ID, " at 30-minute temporal resolution. Additionally, a geometry containing the ", which.FFP.R, "% isopleth boundary is provided."))
+            ncatt_put(ffp.ncout, 0, "summary",
+                      paste0("The file contains the footprint estimation and the quality layer of the station ",
+                             site.ID, " ", summary.res, ". Additionally, a geometry containing the ", which.FFP.R, "% isopleth boundary is provided."))
           } else {
-            
+
             # summary
-            ncatt_put(ffp.ncout, 0, "summary", 
-                      paste0("The file contains the footprint estimation and the quality layer of the station ", 
-                             site.ID, " at 30-minute temporal resolution."))
-            
+            ncatt_put(ffp.ncout, 0, "summary",
+                      paste0("The file contains the footprint estimation and the quality layer of the station ",
+                             site.ID, " ", summary.res, "."))
+
           }
-          
+
           # ## history
           # ncatt_put(ffp.ncout, 0, "history",
           #           paste("ICOS Ecosystem Thematic Centre", date(), sep=", "))
-          
+
           # FundingReference
           #ncatt_put(ffp.ncout, 0, "FundingReference",
           #          "To define...")
-          
+
           # Documentation of the model
           #ncatt_put(ffp.ncout, 0, "Documentation_of_the_model",
           #          "To define...")
-          
-          if(return.isopleth) { 
-            
+
+          if(return.isopleth) {
+
             # Variables
             ncatt_put(ffp.ncout, 0, "variables",
-                      paste0("FFP, QC, ", which.FFP.R, "% isopleth area, ", 
+                      paste0("FFP, QC, ", which.FFP.R, "% isopleth area, ",
                              "EC tower coordinates, bounding box coordinates"))
-            
+
           } else {
-            
+
             # Variables
             ncatt_put(ffp.ncout, 0, "variables",
                       paste0("FFP, QC, EC tower coordinates, bounding box coordinates"))
           }
-          
-          
+
+
           ## [4.6] ## Close the file, write it on the disk
-          
+
           nc_close(ffp.ncout)
-          
-          
+
+
           ##
           ## [7] RAST PLOTS -----
           ##
-          
+
           if(save.ncplot) {
-            
+
             cat(prog.mes(paste0('\n', bold('[7]'), ' Saving the NetCDF sample plot')))
-            
+
             ffp.ncplot.fpath <- paste0(FFP.output.dir, "/nc_files/", 'nc_plots/')
             if(!dir.exists(ffp.ncplot.fpath)) {dir.create(ffp.ncplot.fpath)}
-          
-            # Set the filename #  
+
+            # Set the filename #
             if(do.full.climatology) {
-                
-              ffp.ncplot.fname <- paste0(ffp.ncplot.fpath, site.ID, "_FFP2D_", 
+
+              ffp.ncplot.fname <- paste0(ffp.ncplot.fpath, site.ID, "_FFP2D_",
                                            first_day, "_", last_day, "_full_climatology", '.jpeg')
-              
+
             } else if(do.daily.average) {
-              
+
                 ffp.ncplot.fname <- paste0(ffp.ncplot.fpath, site.ID, "_FFP2D_", i.day, "_daily_average", '.jpeg')
-              
+
             } else {
-                
+
                 ffp.ncplot.fname <- paste0(ffp.ncplot.fpath, site.ID, "_FFP2D_", i.day, '.jpeg')
-                
+
             }
-            
-            # Save the image # 
+
+            # Save the image #
             jpeg(ffp.ncplot.fname, width = 20, height = 13, units = 'cm', res = 300)
-            
+
             if(any(do.full.climatology, do.daily.average))
             {
               # Plot the only layer available #
               terra::plot(terra::rast(ffp.ncfname))
-            
+
               } else {
-              
-              # Sampling of 16 layers (including missing ones) and plotting #
-              terra::plot(terra::rast(ffp.ncfname)[[sort(sample(1:nlyr(terra::rast(ffp.ncfname)), 16))]])  
+
+              # Sampling of 16 layers (including missing ones) and plotting # All the layers when the day has fewer than 16 #
+              n.lyr <- nlyr(terra::rast(ffp.ncfname))
+              terra::plot(terra::rast(ffp.ncfname)[[sort(sample(1:n.lyr, min(16, n.lyr)))]])
             }
-            
+
             dev.off()
-            
+
           }
-          
+
           #cat(prog.mes(' done.\n'))
           cat(prog.mes('\n'))
           cat('\n**************************************************************************************')
-          
+
           # Save output to log
-          Log_list <- c(Log_list, '', paste0(current_day_str, ': ', 
+          Log_list <- c(Log_list, '', paste0(current_day_str, ': ',
                                              'FFP matrices saved as netCDF'))
-          
+
         } # NETcdf file creation chunk ending
-        
+
       } # Conditional DF validity check ending
-      
+
     } # Days loop ending
-    
-    
-    
+
+
     ##
     ## [8] LOG -----
     ##
-    
+
     # Save messages to a unique log file
     if(save.log)  {
-      
+
       cat(prog.mes(paste0('\n', bold('[8]'), ' Saving the log file\n')))
-      
+
       ffp.log.fpath <- paste0(FFP.output.dir, "/log/")
       if(!dir.exists(ffp.log.fpath)) {dir.create(ffp.log.fpath)}
-      
+
       # Create log file
       if(do.full.climatology) {
-        
-        log <- file.path(ffp.log.fpath, paste0(site.ID, '_log_', 
+
+        log <- file.path(ffp.log.fpath, paste0(site.ID, '_log_',
                                                first_day, "_", last_day, "_full_climatology",  ".log"))
       } else if(do.daily.average) {
-        
-        log <- file.path(ffp.log.fpath, paste0(site.ID, '_log_', 
-                                               as_date(min(FFP.input.df$'TIMESTAMP')), '_', 
+
+        log <- file.path(ffp.log.fpath, paste0(site.ID, '_log_',
+                                               as_date(min(FFP.input.df$'TIMESTAMP')), '_',
                                                as_date(max(FFP.input.df$'TIMESTAMP')), "_daily_average", ".log"))
       } else {
-        
-        log <- file.path(ffp.log.fpath, paste0(site.ID, '_log_', 
-                                               as_date(min(FFP.input.df$'TIMESTAMP')), '_', 
+
+        log <- file.path(ffp.log.fpath, paste0(site.ID, '_log_',
+                                               as_date(min(FFP.input.df$'TIMESTAMP')), '_',
                                                as_date(max(FFP.input.df$'TIMESTAMP')), ".log"))
       }
 
       # Open log
       lf <- logr::log_open(log)
-      
-      # Write messages saved to log file 
-      invisible(sapply(Log_list, function(x) logr::log_print(x, console = F, hide_notes = T, 
+
+      # Write messages saved to log file
+      invisible(sapply(Log_list, function(x) logr::log_print(x, console = F, hide_notes = T,
                                                              blank_after = F, msg = F)))
-      
+
       # Close log
       logr::log_close()
-      
+
     } # Log conditional ending
-    
+
   } # DF, Coords and site.ID validity ending...
-  
+
 } # FFP function ending
